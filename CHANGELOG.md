@@ -49,3 +49,7 @@
   `ghcr.io/ayaka-notes/overleaf-pro/git-bridge:6.3.4`, `mongo:9.0`,
   `redis:8.10-alpine`, `nginx:alpine3.24-slim`,
   `chrislusf/seaweedfs:latest`, `ghcr.io/ayaka-notes/texlive-full:2026.1`.
+- `s3-import.py` + `bin/migrate-s3 wipe` now tolerate missing buckets (create
+  on demand) instead of erroring on `NoSuchBucket`.
+- `.gitignore` hardened: TLS material, backup archives, and `config/`/`data/`
+  are excluded so secrets and data never reach git.

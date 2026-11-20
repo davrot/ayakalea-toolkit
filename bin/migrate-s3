@@ -1,0 +1,402 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# bin/migrate-s3 — filesystem → S3 (SeaweedFS) filestore migration.
+#
+# Moves a legacy Overleaf local filestore (…/var/lib/overleaf/data) into the
+# toolkit's S3 plane (SeaweedFS buckets) using the official Overleaf key
+# rules. The legacy backup is treated as strictly READ-ONLY; the import is
+# idempotent, parallel, resumable and MD5-verified.
+#
+# What moves (legacy dir under the data root) → bucket:
+#   user_files/<pj>_<file>            → overleaf-user-files      <pj>/<file>
+#   template_files/<pj>_<file>        → overleaf-template-files  <pj>/<file>
+#   history/overleaf-chunks/…         → overleaf-chunks          verbatim
+#   history/overleaf-project-blobs/…  → overleaf-project-blobs   verbatim
+#   output/…             (opt-in)     → overleaf-user-files      verbatim
+#   *.zip exports        (opt-in)     → overleaf-user-files      exports/<name>
+# Transient dirs (cache/, compiles/, tmp/) are NOT migrated.
+#
+# Usage:
+#   bin/migrate-s3 preflight                 readonly readiness check
+#   bin/migrate-s3 wipe --yes [--dry-run]    blank-slate the target buckets
+#   bin/migrate-s3 import [FLAGS]            import filestore/history → S3
+#       --reimport --skip-existing --with-ephemeral --with-exports --dry-run
+#   bin/migrate-s3 verify                    automated checks + UI checklist
+#   bin/migrate-s3 all [--yes-all] [--wipe] [--with-exports] [--with-ephemeral]
+#                                            full runbook with human gates
+#
+# Settings: LEGACY_ROOT / LEGACY_SERVER_DATA point at the legacy backup
+# (host dir that was bind-mounted as /var/lib/overleaf). Everything else
+# (S3 endpoint, buckets, credentials) is resolved from the toolkit config:
+# overleaf.rc (SEAWEEDFS_S3_HOST/PORT) + variables.env (AWS keys, bucket
+# names). Exporting the same variable name before calling wins.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+
+source "$(dirname "$0")/../lib/toolkit-core.sh"
+
+ayakalea_prepare
+ayakalea_require_config
+
+# ─── Resolved from toolkit config (env exports override) ────────────────────
+S3_ENDPOINT="${S3_ENDPOINT:-http://${SEAWEEDFS_S3_HOST}:${SEAWEEDFS_S3_PORT}}"
+S3_USER_FILES_BUCKET="${S3_USER_FILES_BUCKET:-${OVERLEAF_FILESTORE_USER_FILES_BUCKET_NAME:-overleaf-user-files}}"
+S3_TEMPLATE_FILES_BUCKET="${S3_TEMPLATE_FILES_BUCKET:-${OVERLEAF_FILESTORE_TEMPLATE_FILES_BUCKET_NAME:-overleaf-template-files}}"
+S3_PROJECT_BLOBS_BUCKET="${S3_PROJECT_BLOBS_BUCKET:-${OVERLEAF_HISTORY_PROJECT_BLOBS_BUCKET:-overleaf-project-blobs}}"
+S3_CHUNKS_BUCKET="${S3_CHUNKS_BUCKET:-${OVERLEAF_HISTORY_CHUNKS_BUCKET:-overleaf-chunks}}"
+APP_CONTAINER="${APP_CONTAINER:-ayakalea}"
+S3_CONTAINER="${S3_CONTAINER:-seaweedfs-s3}"
+NETWORK="${NETWORK:-ayaka-network}"
+TARGET_ENV_FILE="${CONFIG_DIR}/variables.env"
+LEGACY_SERVER_DATA="${LEGACY_SERVER_DATA:-${LEGACY_ROOT:-}/overleafserver/data}"
+S3LIB="${AYAKALEA_TOOLKIT_ROOT}/lib/migrate-s3"
+export S3_ENDPOINT S3LIB
+
+log()  { echo "[migrate-s3] $*"; }
+die()  { echo "[migrate-s3] ERROR: $*" >&2; exit 1; }
+require_cmd() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
+require_python_s3() {
+  require_cmd python3
+  python3 -c 'import boto3' 2>/dev/null || die "python3 + boto3 required (pip install boto3)"
+}
+require_s3_container() {
+  docker inspect "$S3_CONTAINER" >/dev/null 2>&1 || \
+    die "container not found: $S3_CONTAINER (is the toolkit stack up? bin/up -d)"
+}
+
+# ═══════════════════════════ preflight ═══════════════════════════════════
+PREFLIGHT_FAIL=0
+pf_ok()   { echo "  [ok  ] $*"; }
+pf_warn() { echo "  [WARN] $*"; }
+pf_bad()  { echo "  [FAIL] $*"; PREFLIGHT_FAIL=1; }
+
+cmd_preflight() {
+  echo "══ legacy backup (source, READONLY) ══"
+  if [ -n "${LEGACY_ROOT:-}" ] && [ -d "${LEGACY_ROOT}" ]; then
+    pf_ok "LEGACY_ROOT: ${LEGACY_ROOT}"
+  else
+    pf_bad "LEGACY_ROOT not set/missing (export LEGACY_ROOT=/path/to/legacy-backup)"
+  fi
+  if [ -d "${LEGACY_SERVER_DATA}/data" ]; then
+    pf_ok "filestore data dir present: ${LEGACY_SERVER_DATA}/data"
+    local s d NF SZ
+    for s in user_files template_files history/overleaf-chunks history/overleaf-project-blobs output; do
+      d="${LEGACY_SERVER_DATA}/data/${s}"
+      if [ -d "${d}" ]; then
+        NF=$(find "${d}" -type f 2>/dev/null | wc -l | tr -d ' ')
+        SZ=$(du -sh "${d}" 2>/dev/null | cut -f1)
+        if [ "${NF}" -gt 0 ]; then pf_ok "store ${s}: ${NF} files (${SZ})"; else pf_warn "store ${s}: present but EMPTY"; fi
+      else
+        pf_warn "store ${s}: absent in this legacy backup"
+      fi
+    done
+    local ZIPS
+    ZIPS=$(find "${LEGACY_SERVER_DATA}" -maxdepth 1 -name '*.zip' 2>/dev/null | wc -l | tr -d ' ')
+    [ "${ZIPS}" -gt 0 ] && pf_warn "${ZIPS} legacy export zip(s) present (import only with --with-exports)"
+  elif [ -n "${LEGACY_ROOT:-}" ]; then
+    pf_warn "filestore data dir not found under LEGACY_ROOT (LEGACY_SERVER_DATA=${LEGACY_SERVER_DATA})"
+  fi
+  if [ -n "${LEGACY_ROOT:-}" ] && [ -f "${LEGACY_ROOT}/.env" ]; then
+    pf_ok "legacy .env present"
+  else
+    pf_warn "legacy .env missing (needed for the config diff)"
+  fi
+
+  echo
+  echo "══ toolkit stack (target) ══"
+  require_cmd docker
+  local c st h net
+  for c in "$APP_CONTAINER" "$S3_CONTAINER"; do
+    st=$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null || echo missing)
+    h=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}-{{end}}' "$c" 2>/dev/null || echo -)
+    if [ "${st}" = "running" ]; then pf_ok "container ${c}: running (health: ${h})"; else pf_bad "container ${c}: ${st} (bin/up -d)"; fi
+  done
+  net=$(docker network inspect "$NETWORK" -f '{{.Driver}}' 2>/dev/null || echo missing)
+  if [ "${net}" = "bridge" ]; then pf_ok "network ${NETWORK} present"; else pf_bad "network ${NETWORK} missing"; fi
+
+  echo
+  echo "══ S3 plane ══"
+  log "endpoint: ${S3_ENDPOINT}"
+  log "buckets : ${S3_USER_FILES_BUCKET} ${S3_TEMPLATE_FILES_BUCKET} ${S3_PROJECT_BLOBS_BUCKET} ${S3_CHUNKS_BUCKET}"
+  log "keys    : access-key ${AWS_ACCESS_KEY_ID:+set}${AWS_SECRET_ACCESS_KEY:+, secret set}"
+  require_s3_container
+  if python3 -c 'import boto3' 2>/dev/null; then
+    local out
+    out=$(S3_USER_FILES_BUCKET="$S3_USER_FILES_BUCKET" S3_TEMPLATE_FILES_BUCKET="$S3_TEMPLATE_FILES_BUCKET" \
+          S3_PROJECT_BLOBS_BUCKET="$S3_PROJECT_BLOBS_BUCKET" S3_CHUNKS_BUCKET="$S3_CHUNKS_BUCKET" \
+      python3 - <<'PY' 2>&1 || true
+import os, sys
+sys.path.insert(0, os.environ["S3LIB"])
+from s3client import client, list_all
+s3 = client()
+rc = 0
+try:
+    s3.list_buckets()
+except Exception as e:
+    print(f"  [FAIL] S3 endpoint unreachable with configured credentials: {e}")
+    sys.exit(1)
+for k in ("S3_USER_FILES_BUCKET","S3_TEMPLATE_FILES_BUCKET","S3_PROJECT_BLOBS_BUCKET","S3_CHUNKS_BUCKET"):
+    b = os.environ[k]
+    try:
+        n = sum(1 for _ in list_all(s3, b))
+        print(f"  [ok  ] bucket {b}: {n} objects (reachable)")
+    except Exception as e:
+        print(f"  [WARN] bucket {b}: {e} (will be created on import)")
+sys.exit(rc)
+PY
+)
+    echo "${out}"
+    echo "${out}" | grep -q '\[FAIL\]' && PREFLIGHT_FAIL=1
+  else
+    pf_warn "python3+boto3 not available (needed by import)"
+  fi
+
+  echo
+  echo "══ config diff (legacy .env vs toolkit variables.env) — decisions to confirm ══"
+  if [ -n "${LEGACY_ROOT:-}" ] && [ -f "${LEGACY_ROOT}/.env" ]; then
+    python3 - "${LEGACY_ROOT}/.env" "${TARGET_ENV_FILE}" <<'PY'
+import re, sys
+def parse(p):
+    d = {}
+    for line in open(p, encoding="utf-8", errors="replace"):
+        m = re.match(r'^\s*([A-Z0-9_]+)\s*=\s*(.*)$', line)
+        if m and not line.strip().startswith("#"):
+            d[m.group(1)] = m.group(2).strip().strip("'\"")
+    return d
+old = parse(sys.argv[1]); new = parse(sys.argv[2])
+keys = sorted(set(k for k in old.keys() | new.keys() if k not in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")))
+def redact(v): return ((v[:6] + "…" + v[-4:]) if len(v) > 12 else (("(set)") if v else "(unset)")) if v is not None else "(absent)"
+for k in keys:
+    o, n = old.get(k), new.get(k)
+    if o == n:
+        if o is not None: print(f"  [same] {k}")
+    else:
+        print(f"  [DIFF] {k}: legacy={redact(o)} | toolkit={redact(n)}")
+PY
+    pf_warn "review the [DIFF] lines: OIDC client, zotero/github credentials, invite token, site name."
+    log "(secrets shown truncated)"
+  else
+    pf_warn "no legacy .env to diff (skip config continuity check)"
+  fi
+
+  echo
+  if [ "${PREFLIGHT_FAIL}" -eq 1 ]; then log "PREFLIGHT FAILED (see [FAIL] lines)"; return 1; fi
+  log "preflight OK — safe to proceed (import is idempotent; wipe needs explicit --yes)."
+}
+
+# ═══════════════════════════ wipe ═════════════════════════════════════════
+cmd_wipe() {
+  local YES=0 DRY_RUN=0 a TS
+  for a in "$@"; do case "$a" in
+    --yes) YES=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    -h|--help) echo "Usage: bin/migrate-s3 wipe --yes [--dry-run]"; exit 0 ;;
+    *) die "unknown flag: $a" ;;
+  esac; done
+  require_python_s3
+  require_s3_container
+  TS=$(date +%Y%m%d-%H%M%S)
+  echo "plan (ts=${TS}):"
+  echo "  s3: delete + recreate buckets: ${S3_USER_FILES_BUCKET} ${S3_TEMPLATE_FILES_BUCKET} ${S3_PROJECT_BLOBS_BUCKET} ${S3_CHUNKS_BUCKET}"
+  if [ "${DRY_RUN}" -eq 1 ]; then log "dry-run: nothing done."; exit 0; fi
+  [ "${YES}" -eq 1 ] || die "refusing without --yes (destructive on the S3 plane)"
+  S3_USER_FILES_BUCKET="$S3_USER_FILES_BUCKET" S3_TEMPLATE_FILES_BUCKET="$S3_TEMPLATE_FILES_BUCKET" \
+  S3_PROJECT_BLOBS_BUCKET="$S3_PROJECT_BLOBS_BUCKET" S3_CHUNKS_BUCKET="$S3_CHUNKS_BUCKET" \
+  python3 - <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["S3LIB"])
+from s3client import client, list_all
+s3 = client()
+for b in [os.environ[k] for k in ("S3_USER_FILES_BUCKET","S3_TEMPLATE_FILES_BUCKET","S3_PROJECT_BLOBS_BUCKET","S3_CHUNKS_BUCKET")]:
+    try:
+        objs = list(list_all(s3, b))
+        for o in objs:
+            s3.delete_object(Bucket=b, Key=o["Key"])
+        s3.delete_bucket(Bucket=b)
+    except Exception:
+        objs = []  # bucket did not exist yet
+    s3.create_bucket(Bucket=b)
+    print(f"[wipe-s3] {b}: deleted {len(objs)} objects, bucket (re)created (empty)")
+PY
+  log "S3 buckets wiped + recreated."
+}
+
+# ═══════════════════════════ import ═══════════════════════════════════════
+cmd_import() {
+  local REIMPORT=0 SKIP_EXISTING=0 WITH_EPHEMERAL=0 WITH_EXPORTS=0 DRY_RUN=0 a
+  for a in "$@"; do case "$a" in
+    --reimport) REIMPORT=1 ;;
+    --skip-existing) SKIP_EXISTING=1 ;;
+    --with-ephemeral) WITH_EPHEMERAL=1 ;;
+    --with-exports) WITH_EXPORTS=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    -h|--help) sed -n '3,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown flag: $a (try --help)" ;;
+  esac; done
+  require_python_s3
+  require_s3_container
+  local LEGACY_DATA="${LEGACY_SERVER_DATA}/data"
+  [ -d "${LEGACY_DATA}" ] || die "legacy filestore data root not found: ${LEGACY_DATA} (set LEGACY_ROOT/LEGACY_SERVER_DATA)"
+
+  local STORES="user_files,template_files"
+  [ -d "${LEGACY_DATA}/history/overleaf-chunks" ]        && STORES="${STORES},history/overleaf-chunks"
+  [ -d "${LEGACY_DATA}/history/overleaf-project-blobs" ] && STORES="${STORES},history/overleaf-project-blobs"
+  if [ "${WITH_EPHEMERAL}" -eq 1 ] && [ -d "${LEGACY_DATA}/output" ]; then STORES="${STORES},output"; fi
+
+  log "target S3   : ${S3_ENDPOINT}"
+  log "legacy data : ${LEGACY_DATA}"
+  local s NF SZ
+  for s in ${STORES//,/ }; do
+    if [ -d "${LEGACY_DATA}/${s}" ]; then
+      NF=$(find "${LEGACY_DATA}/${s}" -type f 2>/dev/null | wc -l | tr -d ' ')
+      SZ=$(du -sh "${LEGACY_DATA}/${s}" 2>/dev/null | cut -f1)
+      if [ "${NF}" -gt 0 ]; then log "  ${s}: ${NF} files (${SZ})"; else log "  ${s}: (0 files — will be skipped)"; fi
+    else
+      log "  ${s}: (absent from legacy data — skipped)"
+    fi
+  done
+
+  local EXTRA=""
+  if [ "${WITH_EXPORTS}" -eq 1 ]; then
+    shopt -s nullglob
+    local z
+    for z in "${LEGACY_SERVER_DATA}"/*.zip; do
+      EXTRA="${EXTRA:+${EXTRA};}${z}=exports/$(basename "${z}")"
+    done
+    [ -n "${EXTRA}" ] && log "extra objects: $(echo "${EXTRA}" | tr ';' '\n' | wc -l) legacy export zip(s)"
+  fi
+  log "reimport? ${REIMPORT}   skip-existing? ${SKIP_EXISTING}"
+  if [ "${DRY_RUN}" -eq 1 ]; then log "dry-run: nothing was changed."; exit 0; fi
+
+  local envvars=(
+    S3_USER_FILES_BUCKET="$S3_USER_FILES_BUCKET" S3_TEMPLATE_FILES_BUCKET="$S3_TEMPLATE_FILES_BUCKET"
+    S3_PROJECT_BLOBS_BUCKET="$S3_PROJECT_BLOBS_BUCKET" S3_CHUNKS_BUCKET="$S3_CHUNKS_BUCKET"
+    LEGACY_DATA="$LEGACY_DATA" STORES="$STORES" EXTRA="$EXTRA"
+    REIMPORT="$REIMPORT" SKIP_EXISTING="$SKIP_EXISTING"
+  )
+  env "${envvars[@]}" python3 "$S3LIB/s3-import.py" import
+  log "verifying import..."
+  env "${envvars[@]}" python3 "$S3LIB/s3-import.py" verify || die "post-import verification reported problems"
+  log "done."
+}
+
+# ═══════════════════════════ verify ═══════════════════════════════════════
+VERIFY_FAIL=0
+cmd_verify() {
+  require_cmd docker
+  echo "══ service health ══"
+  local c h
+  for c in "$APP_CONTAINER" "$S3_CONTAINER"; do
+    h=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}running{{end}}' "$c" 2>/dev/null || echo missing)
+    if [ "${h}" = "healthy" ] || [ "${h}" = "running" ]; then
+      echo "  [ok  ] ${c}: ${h}"
+    else
+      echo "  [FAIL] ${c}: ${h}"; VERIFY_FAIL=1
+    fi
+  done
+  echo
+  echo "══ S3 objects ══"
+  if python3 -c 'import boto3' 2>/dev/null; then
+    S3_USER_FILES_BUCKET="$S3_USER_FILES_BUCKET" S3_TEMPLATE_FILES_BUCKET="$S3_TEMPLATE_FILES_BUCKET" \
+    S3_PROJECT_BLOBS_BUCKET="$S3_PROJECT_BLOBS_BUCKET" S3_CHUNKS_BUCKET="$S3_CHUNKS_BUCKET" \
+    python3 - <<'PY' || VERIFY_FAIL=1
+import os, sys
+sys.path.insert(0, os.environ["S3LIB"])
+from s3client import client, list_all
+s3 = client()
+rc = 0
+for k in ("S3_USER_FILES_BUCKET","S3_TEMPLATE_FILES_BUCKET","S3_PROJECT_BLOBS_BUCKET","S3_CHUNKS_BUCKET"):
+    b = os.environ[k]
+    try:
+        n = sum(1 for _ in list_all(s3, b))
+        print(f"  [ok  ] s3://{b}: {n} objects")
+    except Exception as e:
+        print(f"  [FAIL] s3://{b}: {e}")
+        rc = 1
+sys.exit(rc)
+PY
+  else
+    echo "  (boto3 not installed — skipped)"
+  fi
+  echo
+  echo "══ app HTTP ══"
+  local HTTP
+  HTTP=$(docker exec "$APP_CONTAINER" curl -fsI --connect-timeout 5 http://localhost 2>/dev/null | head -1 || echo "no-response")
+  case "${HTTP}" in
+    *200*|*301*|*302*) echo "  [ok  ] app answers HTTP (${HTTP})" ;;
+    *) echo "  [FAIL] app did not answer HTTP 2xx/3xx (${HTTP})"; VERIFY_FAIL=1 ;;
+  esac
+  echo
+  echo "══ MANUAL UI CHECKLIST (run from a browser) ══"
+  cat <<'CHK'
+  1. login works (admin account) — cookies/secure flags fine
+  2. project list shows the legacy projects; open one: all files visible
+  3. binary file preview works (image inside a project)
+  4. compile a project: PDF builds; images render in the PDF; png2pdf ok
+  5. history panel: legacy snapshots are listed AND render a snapshot
+       ← proves the overleaf-chunks import (the big one)
+  6. upload a NEW file: it appears AND lands in s3://overleaf-user-files
+       (aws s3 ls s3://overleaf-user-files --endpoint-url http://localhost:8333)
+  7. a pre-migration invite link (from the old server) still verifies —
+       proves OVERLEAF_INVITE_TOKEN_SECRET continuity
+  8. GitHub-sync + Zotero integrations still authenticate (client creds!)
+  9. admin: create user / create project smoke test
+CHK
+  if [ "${VERIFY_FAIL}" -ne 0 ]; then log "VERIFICATION FAILED (see [FAIL] lines)"; return 1; fi
+  log "automated verification OK — now walk the manual checklist."
+}
+
+# ═══════════════════════════ all ══════════════════════════════════════════
+cmd_all() {
+  local YES_ALL=0 WITH_WIPE=0 WITH_EXPORTS="" WITH_EPHEMERAL="" a
+  local STEP="${STEP:-1}"
+  for a in "$@"; do case "$a" in
+    --yes-all) YES_ALL=1 ;;
+    --wipe) WITH_WIPE=1 ;;
+    --with-exports) WITH_EXPORTS="--with-exports" ;;
+    --with-ephemeral) WITH_EPHEMERAL="--with-ephemeral" ;;
+    -h|--help) sed -n '3,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown flag: $a" ;;
+  esac; done
+  local ans
+  pause() {
+    [ "${YES_ALL}" -eq 1 ] && return 0
+    echo
+    read -r -p "$1 [Enter to continue / 'abort' to stop] " ans
+    case "${ans:-}" in abort*) die "aborted by user";; esac
+  }
+  step() { echo; echo "══ STEP $1 ══"; shift; "$@"; }
+
+  if [ "${STEP}" -le 1 ]; then
+    step 1 cmd_preflight || exit 1
+  fi
+  if [ "${STEP}" -le 2 ] && [ "${WITH_WIPE}" -eq 1 ]; then
+    pause "Wipe the target S3 buckets (deleted + recreated empty)?" && \
+      step 2 cmd_wipe --yes
+  fi
+  if [ "${STEP}" -le 3 ]; then
+    pause "Import the legacy filestore/history into S3 (--reimport)?"
+    step 3 cmd_import --reimport ${WITH_EXPORTS} ${WITH_EPHEMERAL}
+  fi
+  if [ "${STEP}" -le 4 ]; then
+    step 4 cmd_verify
+  fi
+  log "runbook finished."
+}
+
+# ═══════════════════════════ dispatch ═════════════════════════════════════
+usage() {
+  sed -n '3,32p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+cmd="${1:-help}"
+shift || true
+case "${cmd}" in
+  preflight) cmd_preflight ;;
+  wipe)      cmd_wipe "$@" ;;
+  import)    cmd_import "$@" ;;
+  verify)    cmd_verify ;;
+  all)       cmd_all "$@" ;;
+  help|-h|--help) usage ;;
+  *) usage; die "unknown command: ${cmd}" ;;
+esac

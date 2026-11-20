@@ -1,12 +1,34 @@
+# OS / editor
 .DS_Store
 .idea
-*.log
 *.swp
+*.log
+nohup.out
+
+# Local runtime artifacts
 __old-version
 __old-*
+__pycache__/
+*.pyc
+tmp/
 
+# Backups and archives (may contain full config incl. secrets)
+*.tar
+*.zip
+*.bak
+*-backup*
+
+# TLS material — never commit keys/certs
+*.pem
+*.key
+*.crt
+config/nginx/certs/
+
+# ─── THE important ones ─────────────────────────────────────────────────────
+# User config (secrets: AWS keys, SMTP, OIDC, session secrets) — never commit
 config/**/*
 !config/.gitkeep
 
+# Runtime data (SeaweedFS volumes, filer, mongo, logs) — never commit
 data/**/*
 !data/.gitkeep

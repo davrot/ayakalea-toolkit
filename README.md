@@ -102,7 +102,34 @@ set `NGINX_ENABLED=true` and `bin/up`.
 | `bin/pull-texlive` | pull TeX Live images (+ prints a cron line for auto-updates) |
 | `bin/backup-config [-m zip\|tar\|copy] DEST` | back up `config/` |
 | `bin/upgrade` | guided upgrade: toolkit, app image (images.env), backup, restart |
-| `bin/rename-env-vars-5-0`, `bin/rename-rc-vars` | migrate old `SHARELATEX_*` variable names |
+ `bin/rename-env-vars-5-0`, `bin/rename-rc-vars` | migrate old `SHARELATEX_*` variable names |
+| `bin/migrate-s3 preflight|wipe|import|verify|all` | filesystem → S3 filestore migration (see below) |
+
+## Merging an existing Overleaf instance (filesystem → S3)
+
+Move a legacy local-filestore Overleaf (e.g. a compose_cep backup) into the
+toolkit's S3 filestore without re-creating projects:
+
+```sh
+export LEGACY_ROOT=/path/to/legacy-backup   # dir that was bind-mounted as /var/lib/overleaf
+bin/migrate-s3 preflight                    # read-only readiness check + config diff vs legacy .env
+bin/migrate-s3 wipe --yes                   # optional: blank-slate the four S3 buckets
+bin/migrate-s3 import --reimport [--with-exports]   # upload + MD5 verification
+bin/migrate-s3 verify                       # automated checks + manual UI checklist
+bin/migrate-s3 all --yes-all --wipe         # full runbook with human gates
+```
+
+The tool moves `user_files/`, `template_files/`, `history/overleaf-chunks/`,
+`history/overleaf-project-blobs/` (and optional `output/`, `*.zip` exports)
+using the official Overleaf key rules; the legacy data is never modified. The
+S3 endpoint, buckets and credentials are resolved from the toolkit config
+automatically. Requires `python3` + `boto3` on the host (`pip install boto3`).
+
+Notes:
+- SeaweedFS 4.50 needs ~30 GB of free disk per new volume — plan the
+  SeaweedFS data disk accordingly.
+- After migrating, keep `OVERLEAF_INVITE_TOKEN_SECRET` and the OIDC
+  client-credentials identical to the legacy server (preflight diffs them).
 
 ## What changed vs the upstream toolkit (hard fork)
 
