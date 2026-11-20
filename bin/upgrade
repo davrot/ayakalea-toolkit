@@ -78,9 +78,6 @@ function __main__() {
       ts="$(date +%Y%m%d-%H%M%S)"
       cp "$CONFIG_DIR/images.env" "$CONFIG_DIR/__old-images-$ts"
       echo "Old images.env saved to config/__old-images-$ts"
-      local old
-      old="${AYAKALEA_IMAGE//:/\\:}"
-      new_image="${new_image//:/\\:}"
       sed -i'' "s|^AYAKALEA_IMAGE=.*|AYAKALEA_IMAGE=${new_image}|" "$CONFIG_DIR/images.env"
       echo "AYAKALEA_IMAGE is now $new_image"
     fi
