@@ -127,13 +127,19 @@ def stores():
 
 
 def walk_store(store, legacy):
-    """Yield (key, src) for every file in legacy/<store>."""
+    """Yield (key, src) for every regular file in legacy/<store>.
+
+    Symlinks are skipped: a link escaping the legacy tree would exfiltrate
+    whatever it points at into the S3 plane.
+    """
     root = os.path.join(legacy, store)
     if not os.path.isdir(root):
         return
     for r, _dirs, files in os.walk(root):
         for f in files:
             src = os.path.join(r, f)
+            if os.path.islink(src):
+                continue
             rel = os.path.relpath(src, root).replace(os.sep, "/")
             yield key_for(store, rel), src
 

@@ -13,8 +13,9 @@ services:
     expose:
       - "27017"
     healthcheck:
-      # Initiates the replica set on first boot if not already initiated.
-      test: "mongosh --quiet --eval 'rs.hello().setName ? rs.hello().setName : rs.initiate({_id: \"overleaf\", members: [{_id: 0, host: \"mongo:27017\"}]})'"
+      # Initiates the replica set on first boot if not already initiated
+      # (name from ${MONGO_REPLSET} so custom names work).
+      test: ["CMD-SHELL", "mongosh --quiet --eval \"if (!rs.hello().setName) { rs.initiate({_id: '${MONGO_REPLSET}', members: [{_id: 0, host: 'mongo:27017'}]}) }\""]
       interval: 10s
       timeout: 10s
       retries: 5

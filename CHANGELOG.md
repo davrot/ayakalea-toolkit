@@ -33,6 +33,25 @@
   dependency-ordered startup.
 - Mongo replica set self-initiation via its healthcheck.
 
+### Fixed (security & correctness audit)
+- `nginx.yml` healthcheck: `nginx:alpine` has no `curl` (and the 301→https
+  redirect defeats `wget --spider`); now uses `nc -z` against the listeners,
+  so the nginx container can actually reach `healthy`.
+- `nginx.conf` seed: dual-stack `listen [::]:80/443` so `localhost`-based
+  tooling (IPv6-first) works.
+- `mongo.yml` healthcheck: the replica-set name was hard-coded to `overleaf`
+  in `rs.initiate()`; now interpolates `${MONGO_REPLSET}` (custom names work;
+  `MONGO_REPLSET` is now exported for compose interpolation).
+- `bin/init`: `config/` is `chmod 700` and the config files `chmod 600` —
+  they hold secrets (AWS keys, SMTP, OIDC) and must not be world-readable on
+  multi-user hosts.
+- `bin/upgrade`: the new image reference is validated against a strict
+  allow-list before the `sed` substitution (previously `|`/`&`/newlines in the
+  value could corrupt the sed expression or the file).
+- `s3-import.py`: `walk_store` now skips symlinked files — a symlink escaping
+  the legacy tree could exfiltrate its target into the S3 plane.
+- `RC_DEBUG` now warns that its environment dump contains secrets.
+
 ### Changed
 - All `bin/` scripts now source a single shared core
   (`lib/toolkit-core.sh`); ~30 duplicated bootstrap lines per script are

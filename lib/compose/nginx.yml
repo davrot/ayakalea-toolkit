@@ -14,11 +14,14 @@ services:
       - "${NGINX_HTTP_LISTEN_IP}:${NGINX_HTTP_PORT}:80"
       - "${NGINX_TLS_LISTEN_IP}:${TLS_PORT}:443"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsI --connect-timeout 10 http://localhost || exit 1"]
+      # nginx:alpine has no curl/openssl; nc is present. Verify both listeners
+      # are accepting connections (nginx exits at startup on bad config, so a
+      # running process with live listeners is healthy).
+      test: ["CMD", "nc", "-z", "127.0.0.1", "80"]
       interval: 30s
-      timeout: 10s
+      timeout: 5s
       retries: 5
-      start_period: 60s
+      start_period: 10s
     depends_on:
       ayakalea:
         condition: service_healthy

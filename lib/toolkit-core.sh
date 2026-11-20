@@ -251,7 +251,7 @@ function ensure_data_dirs() {
 function export_compose_vars() {
   export PROJECT_NAME CONFIG_DIR
   export OVERLEAF_DATA_PATH OVERLEAF_LISTEN_IP OVERLEAF_PORT
-  export MONGO_URL OVERLEAF_MONGO_URL MONGO_DATA_PATH MONGO_IMAGE
+  export MONGO_URL OVERLEAF_MONGO_URL MONGO_REPLSET MONGO_DATA_PATH MONGO_IMAGE
   export REDIS_HOST REDIS_PORT REDIS_DATA_PATH REDIS_IMAGE REDIS_COMMAND
   export OVERLEAF_REDIS_HOST
   export GIT_BRIDGE_ENABLED GIT_BRIDGE_DATA_PATH GIT_BRIDGE_IMAGE GIT_BRIDGE_LOG_LEVEL
@@ -271,6 +271,7 @@ function export_compose_vars() {
 
 function print_debug_info() {
   if [[ "${RC_DEBUG:-null}" != "null" ]]; then
+    echo "WARNING: RC_DEBUG is on — the environment dump below CONTAINS SECRETS (do not paste into tickets/logs)." >&2
     echo ">>>>>>VARS>>>>>>" >&2
     echo "$(set -o posix; set)" >&2
     echo "<<<<<<<<<<<<<<<<" >&2

@@ -74,6 +74,10 @@ function __main__() {
     if [[ -z "$new_image" ]]; then
       echo "Keeping the current image."
     else
+      if [[ ! "$new_image" =~ ^[a-zA-Z0-9][a-zA-Z0-9._/:@-]*$ ]]; then
+        echo "Refusing: '$new_image' is not a valid image reference (unexpected characters)."
+        exit 1
+      fi
       local ts
       ts="$(date +%Y%m%d-%H%M%S)"
       cp "$CONFIG_DIR/images.env" "$CONFIG_DIR/__old-images-$ts"
