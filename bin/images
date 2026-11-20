@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Shows every image from config/images.env and whether it is present locally.
+set -uo pipefail
+
+source "$(dirname "$0")/../lib/toolkit-core.sh"
+
+function usage() {
+  echo "Usage: bin/images"
+  echo ""
+  echo "Prints the images configured in config/images.env and their local status."
+}
+
+function __main__() {
+  if [[ "${1:-null}" == "help" || "${1:-null}" == "--help" ]]; then
+    usage && exit
+  fi
+
+  ayakalea_prepare
+  ayakalea_require_config
+
+  local vars=(AYAKALEA_IMAGE MONGO_IMAGE REDIS_IMAGE GIT_BRIDGE_IMAGE NGINX_IMAGE SEAWEEDFS_IMAGE TEXLIVE_IMAGE)
+  local v ref status
+  for v in "${vars[@]}"; do
+    ref="${!v}"
+    status="MISSING"
+    if docker image inspect "$ref" >/dev/null 2>&1; then
+      status="$(docker image inspect --format '{{.Id}}  {{.Size}}' "$ref" 2>/dev/null || echo present)"
+    fi
+    printf '%-22s %-55s %s\n' "$v" "$ref" "$status"
+  done
+
+  echo
+  echo "TeX Live images (sandboxed compiles):"
+  local img
+  for img in $(echo "$ALL_TEX_LIVE_DOCKER_IMAGES" | tr ',' ' '); do
+    local st="MISSING"
+    docker image inspect "$img" >/dev/null 2>&1 && st="present"
+    printf '  %-55s %s\n' "$img" "$st"
+  done
+}
+
+__main__ "$@"

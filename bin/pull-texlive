@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Pulls the TeX Live images listed in config/images.env (TEXLIVE_IMAGE).
+# Also prints a cron line for automatic updates:
+#   Docs: https://ayakaleaf-pro.ayaka.space/on-premises/maintenance/updating-tex-live-full-images-automatically
+set -uo pipefail
+
+source "$(dirname "$0")/../lib/toolkit-core.sh"
+
+function usage() {
+  echo "Usage: bin/pull-texlive [IMAGE...]"
+  echo ""
+  echo "Pulls the TeX Live images from config/images.env (or the ones given as arguments)."
+}
+
+function __main__() {
+  if [[ "${1:-null}" == "help" || "${1:-null}" == "--help" ]]; then
+    usage && exit
+  fi
+
+  ayakalea_prepare
+  ayakalea_require_config
+  has_docker || ayakalea_die "Docker is not running or not installed"
+
+  local images=("$@")
+  if [[ ${#images[@]} -eq 0 ]]; then
+    IFS=',' read -r -a images <<< "$ALL_TEX_LIVE_DOCKER_IMAGES"
+    # trim spaces
+    local i
+    for i in "${!images[@]}"; do
+      images[$i]="${images[$i]# }"
+    done
+  fi
+
+  mkdir -p "$AYAKALEA_TOOLKIT_ROOT/data"
+  local log="$AYAKALEA_TOOLKIT_ROOT/data/pull-texlive.log"
+  echo "===== $(date -Is) pull started =====" >> "$log"
+  local rc=0 img
+  for img in "${images[@]}"; do
+    [[ -z "$img" ]] && continue
+    echo "  - $img download started (may take some time)"
+    if docker pull "$img" 2>&1 | tee -a "$log" >/dev/null; then
+      echo "  - $img download finished"
+      echo "OK   $img" >> "$log"
+    else
+      echo "  - $img FAILED" >&2
+      echo "FAIL $img" >> "$log"
+      rc=1
+    fi
+  done
+  echo "===== $(date -Is) pull finished (rc=$rc) =====" >> "$log"
+  echo
+  echo "Log: $log"
+  echo "Cron (one image per hour, all refreshed daily):"
+  echo "  0 * * * * /usr/bin/flock -n /tmp/pull-texlive.lock $AYAKALEA_TOOLKIT_ROOT/bin/pull-texlive"
+  exit $rc
+}
+
+__main__ "$@"

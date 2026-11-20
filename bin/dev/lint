@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Lint all shell scripts of the toolkit.
+cd "$(dirname "$0")/../.."
+exec find bin lib -type f -not -name '*.swp' -print0 | xargs -0 shellcheck

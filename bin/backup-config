@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Creates a copy (zip, tar or plain copy) of the current configuration.
+set -euo pipefail
+
+source "$(dirname "$0")/../lib/toolkit-core.sh"
+
+function usage() {
+  echo "Usage: bin/backup-config [OPTIONS] DESTINATION"
+  echo ""
+  echo "Backs up the config/ directory to DESTINATION"
+  echo ""
+  echo "Options:"
+  echo "  -m              mode: zip | tar | copy (default=copy)"
+  echo ""
+  echo "Examples:"
+  echo "  bin/backup-config -m zip ~/ayakalea-config-backup.zip"
+  echo "  bin/backup-config -m tar ~/ayakalea-config-backup.tar"
+  echo "  bin/backup-config ~/ayakalea-config-backup"
+}
+
+function __main__() {
+  local mode="copy"
+  while getopts "m:" opt; do
+    case "$opt" in
+      m) mode="${OPTARG}" ;;
+      \?) usage; exit 1 ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  if [[ "${1:-null}" == "null" || "${1:-null}" == "help" || "${1:-null}" == "--help" ]]; then
+    usage; exit
+  fi
+
+  local destination="$1"
+  if [[ "$mode" == "copy" ]]; then
+    cp -r "$AYAKALEA_TOOLKIT_ROOT/config" "$destination"
+  elif [[ "$mode" == "zip" ]]; then
+    zip -j -r "$destination" "$AYAKALEA_TOOLKIT_ROOT/config"
+  elif [[ "$mode" == "tar" ]]; then
+    tar -cf "$destination" -C "$AYAKALEA_TOOLKIT_ROOT" config
+  else
+    ayakalea_die "unrecognised mode '$mode' (expected zip, tar or copy)"
+  fi
+}
+
+__main__ "$@"

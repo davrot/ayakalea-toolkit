@@ -1,0 +1,11 @@
+---
+# Direct host access for the app (only used when NGINX_ENABLED=false).
+# Behind the nginx proxy the app must not surface to the host.
+services:
+  ayakalea:
+    ports:
+      - "${OVERLEAF_LISTEN_IP}:${OVERLEAF_PORT}:80"
+
+networks:
+  ayaka-network:
+    external: true

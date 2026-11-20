@@ -1,0 +1,84 @@
+# =====================================================================
+#  Ayakalea Toolkit — toolkit settings
+#  Docs: https://ayakaleaf-pro.ayaka.space/on-premises/configuration/overleaf-toolkit/toolkit-settings
+# =====================================================================
+
+# Docker compose project name (use a different name to run several instances on one host)
+PROJECT_NAME=ayakalea
+
+# All services live on the internal Docker network 'ayaka-network'
+# (created automatically if missing). Only nginx publishes host ports.
+
+# -------------------------
+#  Ayakalea (app) container
+# -------------------------
+# Image: see config/images.env (AYAKALEA_IMAGE)
+# Directory for project files, compiles and templates
+OVERLEAF_DATA_PATH=data/overleaf
+# Direct host access — only published when NGINX_ENABLED=false
+OVERLEAF_LISTEN_IP=127.0.0.1
+OVERLEAF_PORT=80
+# Optionally expose application logs on the host (comment out to disable)
+# OVERLEAF_LOG_PATH=data/log
+
+# -----------------------------
+#  Sandboxed compiles (TeX Live)
+# -----------------------------
+# Compile every project in its own container (recommended)
+SIBLING_CONTAINERS_ENABLED=true
+DOCKER_SOCKET_PATH=/var/run/docker.sock
+# Pull the TeX Live images from config/images.env on bin/up
+SIBLING_CONTAINERS_PULL=true
+
+# -------------
+#  MongoDB
+# -------------
+MONGO_ENABLED=true
+MONGO_DATA_PATH=data/mongo
+# Replica set / database names (kept for data compatibility)
+MONGO_REPLSET=overleaf
+MONGO_DB=sharelatex
+# If MONGO_ENABLED=false, point MONGO_URL at an external database, e.g.
+# MONGO_URL=mongodb://user:pass@host:27017/sharelatex
+
+# -------------
+#  Redis
+# -------------
+REDIS_ENABLED=true
+REDIS_DATA_PATH=data/redis
+# Append-only persistence (durable sessions and in-flight edits)
+REDIS_AOF_PERSISTENCE=true
+
+# ---------------------------
+#  Git bridge (git access)
+# ---------------------------
+GIT_BRIDGE_ENABLED=true
+GIT_BRIDGE_DATA_PATH=data/git-bridge
+GIT_BRIDGE_LOG_LEVEL=INFO
+
+# --------------------------------
+#  SeaweedFS S3 storage (filestore + history)
+# --------------------------------
+SEAWEEDFS_ENABLED=true
+SEAWEEDFS_DATA_PATH=data/seaweedfs
+# S3 API endpoint published on the host (local admin/migration tools only)
+SEAWEEDFS_S3_HOST=127.0.0.1
+SEAWEEDFS_S3_PORT=8333
+# S3 credentials are generated in config/variables.env by bin/init (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)
+
+# ---------------------------
+#  TLS proxy (nginx)
+#  Docs: https://ayakaleaf-pro.ayaka.space/on-premises/configuration/overleaf-toolkit/tls-proxy
+# ---------------------------
+NGINX_ENABLED=false
+NGINX_CONFIG_PATH=config/nginx/nginx.conf
+NGINX_HTTP_PORT=80
+# Replace these with the external IP address of your host
+NGINX_HTTP_LISTEN_IP=127.0.1.1
+NGINX_TLS_LISTEN_IP=127.0.1.1
+TLS_PORT=443
+TLS_PRIVATE_KEY_PATH=config/nginx/certs/ayakalea_key.pem
+TLS_CERTIFICATE_PATH=config/nginx/certs/ayakalea_certificate.pem
+
+# Air-gapped / offline: skip pulling images on bin/up and bin/upgrade
+# PULL_BEFORE_UPGRADE=false

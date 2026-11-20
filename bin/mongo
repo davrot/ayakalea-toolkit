@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Starts a mongo shell inside the mongo container, switched to the
+# application database (default: sharelatex).
+set -euo pipefail
+
+source "$(dirname "$0")/../lib/toolkit-core.sh"
+
+ayakalea_prepare
+ayakalea_require_config
+ayakalea_compose exec -it mongo mongosh --quiet "$MONGO_DB"

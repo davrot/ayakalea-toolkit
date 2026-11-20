@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Initialises the local configuration files in config/ (never overwrites).
+set -euo pipefail
+
+source "$(dirname "$0")/../lib/toolkit-core.sh"
+
+function usage() {
+  echo "Usage: bin/init [OPTION]"
+  echo ""
+  echo "Initialises local configuration files in the 'config/' directory:"
+  echo "  config/overleaf.rc     toolkit settings (services, paths, ports)"
+  echo "  config/images.env      every container image name in one place"
+  echo "  config/variables.env   application environment variables"
+  echo "Secrets (invite token, session secret, S3 keys) are generated for you."
+  echo ""
+  echo "--tls        Initialise (or add) the nginx TLS proxy configuration,"
+  echo "             including a self-signed example certificate"
+  echo "--help       display this help and exit"
+}
+
+function config_exists() {
+  [[ -f "$CONFIG_DIR/overleaf.rc" || -f "$CONFIG_DIR/variables.env" || -f "$CONFIG_DIR/images.env" ]]
+}
+
+function tls_config_exists() {
+  [[ -f "$CONFIG_DIR/nginx/nginx.conf" || -f "$CONFIG_DIR/nginx/certs/ayakalea_key.pem" ]]
+}
+
+function set_up_config_files() {
+  echo "Copying config files to 'config/'"
+  cp "$AYAKALEA_TOOLKIT_ROOT/lib/config-seed/overleaf.rc" "$CONFIG_DIR/"
+  cp "$AYAKALEA_TOOLKIT_ROOT/lib/config-seed/images.env" "$CONFIG_DIR/"
+  cp "$AYAKALEA_TOOLKIT_ROOT/lib/config-seed/variables.env" "$CONFIG_DIR/"
+
+  local secret
+  secret="$(openssl rand -base64 32)"
+  sed -i'' "s|^OVERLEAF_INVITE_TOKEN_SECRET=.*|OVERLEAF_INVITE_TOKEN_SECRET=${secret}|" "$CONFIG_DIR/variables.env"
+  local session
+  session="$(openssl rand -hex 32)"
+  sed -i'' "s|^OVERLEAF_SESSION_SECRET=.*|OVERLEAF_SESSION_SECRET=${session}|" "$CONFIG_DIR/variables.env"
+
+  # S3 API keys for the SeaweedFS service (only when enabled in overleaf.rc)
+  if grep -q '^SEAWEEDFS_ENABLED=true' "$CONFIG_DIR/overleaf.rc"; then
+    local ak sk
+    ak="$(openssl rand -base64 30 | tr -dc 'a-zA-Z0-9' | head -c 20)"
+    sk="$(openssl rand -base64 60 | tr -dc 'a-zA-Z0-9' | head -c 40)"
+    sed -i'' "s|^AWS_ACCESS_KEY_ID=.*|AWS_ACCESS_KEY_ID=${ak}|" "$CONFIG_DIR/variables.env"
+    sed -i'' "s|^AWS_SECRET_ACCESS_KEY=.*|AWS_SECRET_ACCESS_KEY=${sk}|" "$CONFIG_DIR/variables.env"
+  fi
+  echo "Generated OVERLEAF_INVITE_TOKEN_SECRET, OVERLEAF_SESSION_SECRET" \
+       $([[ -n "${ak:-}" ]] && echo "and the SeaweedFS S3 keys")
+}
+
+function set_up_tls_proxy() {
+  mkdir -p "$CONFIG_DIR/nginx/certs"
+  cp "$AYAKALEA_TOOLKIT_ROOT/lib/config-seed/nginx.conf" "$CONFIG_DIR/nginx/"
+  local key="$CONFIG_DIR/nginx/certs/ayakalea_key.pem"
+  local csr="$CONFIG_DIR/nginx/certs/ayakalea_csr.pem"
+  local cert="$CONFIG_DIR/nginx/certs/ayakalea_certificate.pem"
+  echo "Generating example self-signed TLS certificate (example.com — replace with a real one)"
+  openssl req -new -nodes -keyout "$key" -out "$csr" -subj "/CN=example.com" -batch
+  chmod 600 "$key"
+  openssl x509 -req -days 365 -in "$csr" -signkey "$key" -out "$cert"
+}
+
+HELP=false
+TLS=false
+
+function __main__() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      help|--help) HELP=true; shift ;;
+      --tls) TLS=true; shift ;;
+      *) echo "Unrecognised option: $1" >&2; usage; exit 1 ;;
+    esac
+  done
+  if [[ "$HELP" == "true" ]]; then usage; exit 0; fi
+
+  CONFIG_DIR="$AYAKALEA_TOOLKIT_ROOT/config"
+  mkdir -p "$CONFIG_DIR"
+
+  if config_exists; then
+    if [[ "$TLS" == "true" ]]; then
+      note "Config files already exist, keeping them"
+    else
+      ayakalea_die "Config files already exist in config/, exiting"
+    fi
+  else
+    set_up_config_files
+  fi
+
+  if [[ "$TLS" == "true" ]]; then
+    if tls_config_exists; then
+      ayakalea_die "TLS config files already exist, exiting"
+    else
+      set_up_tls_proxy
+    fi
+  fi
+
+  echo
+  echo "Next steps:"
+  echo "  1. Edit config/overleaf.rc, config/images.env and config/variables.env"
+  echo "  2. bin/up -d"
+  echo "  3. bin/doctor"
+}
+
+__main__ "$@"

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Transparent wrapper around `docker compose` for the Ayakalea Toolkit.
+# Example: bin/docker-compose ps
+set -euo pipefail
+
+source "$(dirname "$0")/../lib/toolkit-core.sh"
+
+ayakalea_prepare
+print_debug_info "$@"
+has_docker || ayakalea_die "Docker is not running or not installed"
+ensure_network
+ayakalea_compose "$@"

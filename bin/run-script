@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Runs a server script inside the ayakalea container with its environment.
+set -euo pipefail
+
+source "$(dirname "$0")/../lib/toolkit-core.sh"
+
+function usage() {
+  echo "Usage:"
+  echo "  bin/run-script [-e 'VAR1=value VAR2=value'] [SCRIPT...] [SCRIPT_ARGS..]"
+  echo "  bin/run-script [OPTIONS]"
+  echo ""
+  echo "Options:"
+  echo "  help              print this help"
+  echo "  ls                print a list of all available scripts"
+  echo "  -e                space-separated list of environment variables (optional)"
+  echo ""
+  echo "Examples:"
+  echo "  bin/run-script scripts/create_project.js --user-id=649c3f45711ad101a13de737"
+  echo "  bin/run-script -e 'PROJECT_ID=5ac1011aa13de547c3fd' scripts/delete_dangling_file_refs.js"
+  echo "  bin/run-script ls"
+}
+
+function __main__() {
+  local env_vars=""
+  while getopts ":e:" opt; do
+    case "$opt" in
+      e) env_vars="${OPTARG}" ;;
+      \?) usage; exit 1 ;;
+      :) usage; exit 1 ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  if [[ "${1:-null}" == "null" || "${1:-null}" == "help" || "${1:-null}" == "--help" ]]; then
+    usage; exit
+  fi
+
+  if [[ "${1:-}" == "ls" || "${1:-}" == "--ls" ]]; then
+    local cmd="cd /overleaf/services/web && find scripts/ modules/server-ce-scripts/scripts/ -maxdepth 1 -type f"
+    ayakalea_prepare
+    ayakalea_compose exec -it ayakalea bash -c "$cmd"
+    exit
+  fi
+
+  local container_env="source /etc/overleaf/env.sh || source /etc/sharelatex/env.sh && source /etc/container_environment.sh"
+  local run_cmd="${container_env} && cd /overleaf/services/web && ${env_vars} node $*"
+  ayakalea_prepare
+  ayakalea_compose exec -it ayakalea bash -c "$run_cmd"
+}
+
+__main__ "$@"

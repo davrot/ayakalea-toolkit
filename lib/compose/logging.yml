@@ -1,0 +1,10 @@
+---
+# Optional: expose application logs on the host (set OVERLEAF_LOG_PATH in overleaf.rc)
+services:
+  ayakalea:
+    volumes:
+      - "${OVERLEAF_LOG_PATH}:/var/log/overleaf:z"
+
+networks:
+  ayaka-network:
+    external: true

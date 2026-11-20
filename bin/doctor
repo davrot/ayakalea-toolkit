@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# Collects installation and deployment information and points out problems.
+# Exit code: 0 when no errors were found (warnings allowed), 1 otherwise.
+set -uo pipefail
+
+source "$(dirname "$0")/../lib/toolkit-core.sh"
+
+ERRORS=()
+WARNINGS=()
+INFO=()
+
+function ok()     { INFO+=("  [ OK ] $*"); }
+function warn()   { WARNINGS+=("  [WARN] $*"); }
+function error()  { ERRORS+=("  [ERR ] $*"); }
+function section(){ echo; echo "## $*"; }
+
+function __main__() {
+  if [[ "${1:-null}" == "help" || "${1:-null}" == "--help" ]]; then
+    echo "Usage: bin/doctor"
+    exit
+  fi
+
+  # ------------------------------------------------------------------
+  section "Prerequisites"
+  if command -v docker >/dev/null 2>&1; then ok "docker CLI installed"; else error "docker CLI not found"; fi
+  if docker compose version >/dev/null 2>&1; then ok "Docker Compose v2"; \
+    elif command -v docker-compose >/dev/null 2>&1; then warn "docker-compose v1 (deprecated) in use"; \
+    else error "docker compose not found"; fi
+  if has_docker; then ok "Docker daemon is reachable"; else warn "Docker daemon not reachable (runtime checks will be skipped)"; fi
+  command -v openssl >/dev/null 2>&1 && ok "openssl installed" || warn "openssl not found (needed by bin/init for secrets)"
+  command -v git >/dev/null 2>&1 && ok "git installed" || warn "git not found (bin/upgrade needs it)"
+
+  # ------------------------------------------------------------------
+  section "Configuration"
+  CONFIG_DIR="$AYAKALEA_TOOLKIT_ROOT/config"
+  local f
+  for f in overleaf.rc images.env variables.env; do
+    [[ -f "$CONFIG_DIR/$f" ]] && ok "config/$f present" || error "config/$f missing (run bin/init)"
+  done
+  [[ -f "$CONFIG_DIR/version" ]] && warn "config/version is legacy — its value is folded into config/images.env; delete it after checking bin/images"
+
+  ayakalea_prepare
+
+  [[ -n "${OVERLEAF_INVITE_TOKEN_SECRET:-}" ]] && ok "OVERLEAF_INVITE_TOKEN_SECRET is set" || error "OVERLEAF_INVITE_TOKEN_SECRET is empty (required, regenerate with bin/init)"
+  [[ -n "${OVERLEAF_SESSION_SECRET:-}" ]] && ok "OVERLEAF_SESSION_SECRET is set" || warn "OVERLEAF_SESSION_SECRET is empty — every bin/up will log all users out"
+  [[ -n "${OVERLEAF_SITE_URL:-}" ]] || warn "OVERLEAF_SITE_URL is not set in config/variables.env"
+  case "${EXTERNAL_AUTH:-none}" in
+    none|ldap|saml|oidc|oidc+ldap|saml+ldap|ldap+saml|oidc+saml) ok "EXTERNAL_AUTH=${EXTERNAL_AUTH:-none}" ;;
+    *) error "EXTERNAL_AUTH='${EXTERNAL_AUTH}' is not a recognised value" ;;
+  esac
+  if [[ "$SIBLING_CONTAINERS_ENABLED" == "true" ]]; then
+    [[ -e "$DOCKER_SOCKET_PATH" ]] && ok "Docker socket $DOCKER_SOCKET_PATH exists" || error "DOCKER_SOCKET_PATH=$DOCKER_SOCKET_PATH does not exist"
+    [[ -n "${ALL_TEX_LIVE_DOCKER_IMAGES:-}" ]] && ok "TeX Live images: ${ALL_TEX_LIVE_DOCKER_IMAGES}" || error "no TeX Live images configured (images.env TEXLIVE_IMAGE)"
+  fi
+  if [[ "$SEAWEEDFS_ENABLED" == "true" ]]; then
+    [[ -n "${AWS_ACCESS_KEY_ID:-}" && -n "${AWS_SECRET_ACCESS_KEY:-}" ]] \
+      && ok "SeaweedFS S3 credentials are set" || error "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are empty (needed by SeaweedFS S3)"
+  fi
+  if [[ "$NGINX_ENABLED" == "true" ]]; then
+    [[ -f "$TLS_PRIVATE_KEY_PATH" ]] && ok "TLS private key: $TLS_PRIVATE_KEY_PATH" || error "TLS private key missing: $TLS_PRIVATE_KEY_PATH"
+    [[ -f "$TLS_CERTIFICATE_PATH" ]] && ok "TLS certificate: $TLS_CERTIFICATE_PATH" || error "TLS certificate missing: $TLS_CERTIFICATE_PATH"
+    [[ -f "$NGINX_CONFIG_PATH" ]] && ok "nginx config: $NGINX_CONFIG_PATH" || error "nginx config missing: $NGINX_CONFIG_PATH"
+    ok "OVERLEAF_TRUSTED_PROXY_IPS=${OVERLEAF_TRUSTED_PROXY_IPS}"
+  fi
+
+  # ------------------------------------------------------------------
+  section "Images (config/images.env)"
+  if has_docker; then
+    local v ref
+    for v in AYAKALEA_IMAGE MONGO_IMAGE REDIS_IMAGE GIT_BRIDGE_IMAGE NGINX_IMAGE SEAWEEDFS_IMAGE; do
+      ref="${!v}"
+      docker image inspect "$ref" >/dev/null 2>&1 && ok "$v = $ref (local)" || warn "$v = $ref (not pulled yet)"
+    done
+    local img
+    for img in $(echo "$ALL_TEX_LIVE_DOCKER_IMAGES" | tr ',' ' '); do
+      [[ -z "$img" ]] && continue
+      docker image inspect "$img" >/dev/null 2>&1 && ok "texlive $img (local)" || warn "texlive $img (not pulled yet — bin/pull-texlive)"
+    done
+  fi
+
+  # ------------------------------------------------------------------
+  section "Runtime"
+  if has_docker; then
+    if docker network inspect "ayaka-network" >/dev/null 2>&1; then
+      ok "network 'ayaka-network' exists"
+    else
+      warn "network 'ayaka-network' missing (created automatically by bin/up)"
+    fi
+
+    if ayakalea_compose ps 2>/dev/null | grep -q "ayakalea"; then
+      local running
+      running="$(ayakalea_compose ps --format '{{.Service}}' 2>/dev/null | sort -u | tr '\n' ' ')"
+      ok "running services: ${running:-none}"
+      if [[ -z "${running:-}" ]]; then
+        warn "no services running yet (bin/up -d)"
+      else
+        local status
+        status="$(ayakalea_compose ps --format '{{.Service}}:{{.Status}}' 2>/dev/null)"
+        echo "$status" | sed 's/^/       /'
+        if echo "$status" | grep -qi "unhealthy"; then
+          warn "a service is unhealthy"
+        else
+          ok "no unhealthy services"
+        fi
+        if echo "$status" | grep -qiE "restarting|exit"; then
+          warn "a service is restarting or exited"
+        fi
+      fi
+
+      # service probes (only for services that are running)
+      local probe service
+      probe() { # name command
+        local name="$1"; shift
+        if ayakalea_compose ps --format '{{.Service}}' 2>/dev/null | grep -qx "$name"; then
+          if "$@" >/dev/null 2>&1; then ok "probe $name"; else warn "probe $name failed"; fi
+        fi
+      }
+      probe mongo    ayakalea_compose exec -T mongo mongosh --quiet --eval 'rs.status().ok'
+      probe redis    ayakalea_compose exec -T redis sh -c 'redis-cli ping | grep -q PONG'
+      probe git-bridge ayakalea_compose exec -T git-bridge wget -q --spider http://localhost:8000/status
+      probe seaweedfs-s3 ayakalea_compose exec -T seaweedfs-s3 sh -c 'wget -S -o- http://localhost:8333/ 2>&1 | grep -q "HTTP/"'
+      probe ayakalea ayakalea_compose exec -T ayakalea sh -c 'curl -fsI --connect-timeout 10 http://localhost'
+
+      if [[ "$MONGO_ENABLED" == "true" ]] && ayakalea_compose ps --format '{{.Service}}' 2>/dev/null | grep -qx mongo; then
+        local dbs
+        dbs="$(ayakalea_compose exec -T mongo mongosh --quiet --eval 'db.adminCommand({listDatabases:1}).databases.map(d=>d.name).join(",")' 2>/dev/null || true)"
+        if [[ -n "$dbs" ]]; then
+          if echo "$dbs" | tr ',' '\n' | grep -qx "$MONGO_DB"; then ok "mongo database '$MONGO_DB' present"; else warn "mongo database '$MONGO_DB' not found (databases: $dbs)"; fi
+        fi
+      fi
+    else
+      warn "no containers running (expected before the first bin/up)"
+    fi
+  fi
+
+  # ------------------------------------------------------------------
+  echo
+  for line in "${INFO[@]}"; do echo "$line"; done
+  for line in "${WARNINGS[@]}"; do echo "$line"; done
+  for line in "${ERRORS[@]}"; do echo "$line"; done
+  echo
+  if [[ ${#ERRORS[@]} -gt 0 ]]; then
+    echo "doctor: ${#ERRORS[@]} error(s), ${#WARNINGS[@]} warning(s) — fix the errors above, then re-run bin/doctor"
+    exit 1
+  fi
+  echo "doctor: no errors, ${#WARNINGS[@]} warning(s)"
+  exit 0
+}
+
+__main__ "$@"

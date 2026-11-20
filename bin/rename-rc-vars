@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Migrates config/overleaf.rc from the ShareLaTeX era to the OVERLEAF_ names.
+set -euo pipefail
+
+source "$(dirname "$0")/../lib/toolkit-core.sh"
+
+function __main__() {
+  if [[ "${1:-null}" == "help" || "${1:-null}" == "--help" ]]; then
+    echo "Usage: bin/rename-rc-vars"
+    echo ""
+    echo "Updates config/overleaf.rc: renames 'SHARELATEX_' variables to 'OVERLEAF_'."
+    exit
+  fi
+
+  local file="$AYAKALEA_TOOLKIT_ROOT/config/overleaf.rc"
+  [[ -f "$file" ]] || ayakalea_die "config/overleaf.rc not found"
+
+  echo "This script will update your config/overleaf.rc."
+  echo "We recommend backing up your config with bin/backup-config first."
+  read -r -p "Continue? [y/N] " ans
+  [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+
+  sed -i'' -E 's/^(SHARELATEX_)([A-Z_0-9]+)=/OVERLEAF_\2=/' "$file"
+  sed -i'' -E 's/^\s*#?\s*(SHARELATEX_)([A-Z_0-9]+)=/# OVERLEAF_\2=/' "$file"
+
+  echo "Done."
+}
+
+__main__ "$@"

@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# Assists with instance upgrades:
+#   1. offers to update the Toolkit code (git)
+#   2. offers to change the Ayakalea image (config/images.env)
+#   3. backs up the current config (config/__old-version)
+#   4. stops, restarts and reports
+# All steps are opt-in; answering "no" changes nothing.
+set -uo pipefail
+
+source "$(dirname "$0")/../lib/toolkit-core.sh"
+
+ASSUME_YES=false
+
+function confirm() { # question [default y|n]
+  local question="$1" def="${2:-y}" ans
+  if [[ "$ASSUME_YES" == "true" ]]; then
+    [[ "$def" == "y" ]]
+    return
+  fi
+  read -r -p "$question [y/N] " ans
+  [[ "$def" == "y" ]] && ans="${ans:-y}"
+  [[ "${ans:-n}" =~ ^[Yy]$ ]]
+}
+
+function __main__() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -y|--yes) ASSUME_YES=true; shift ;;
+      help|--help|-h)
+        echo "Usage: bin/upgrade [-y]"
+        echo "Assumes 'yes' for every question with -y."
+        exit 0 ;;
+      *) echo "Unrecognised option: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  ayakalea_prepare
+  ayakalea_require_config
+  has_docker || ayakalea_die "Docker is not running or not installed"
+
+  # ---------------- 1. Toolkit code ----------------
+  echo "=== 1. Toolkit code ==="
+  if git -C "$AYAKALEA_TOOLKIT_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "branch:  $(git -C "$AYAKALEA_TOOLKIT_ROOT" branch --show-current 2>/dev/null)"
+    echo "commit:  $(git -C "$AYAKALEA_TOOLKIT_ROOT" log --oneline -1 2>/dev/null)"
+    if git -C "$AYAKALEA_TOOLKIT_ROOT" fetch --quiet 2>/dev/null; then
+      local behind
+      behind="$(git -C "$AYAKALEA_TOOLKIT_ROOT" rev-list --count HEAD..@{u} 2>/dev/null || echo 0)"
+      if [[ "${behind:-0}" -gt 0 ]]; then
+        echo "There are $behind new commit(s) on the remote."
+        if confirm "Update the Toolkit now?"; then
+          git -C "$AYAKALEA_TOOLKIT_ROOT" pull --ff-only || ayakalea_die "git pull failed"
+          echo "Toolkit updated."
+        else
+          echo "Keeping the current Toolkit."
+        fi
+      else
+        echo "Toolkit is up to date."
+      fi
+    else
+      echo "(no reachable remote or no upstream branch — skipping update check)"
+    fi
+  else
+    echo "(toolkit is not a git repository — skipping update check)"
+  fi
+
+  # ---------------- 2. Ayakalea image ----------------
+  echo
+  echo "=== 2. Ayakalea image ==="
+  echo "Current: $AYAKALEA_IMAGE"
+  local new_image=""
+  if confirm "Change the Ayakalea image?" "n"; then
+    read -r -p "New image (e.g. ghcr.io/ayaka-notes/overleaf-pro:6.3.4): " new_image
+    if [[ -z "$new_image" ]]; then
+      echo "Keeping the current image."
+    else
+      local ts
+      ts="$(date +%Y%m%d-%H%M%S)"
+      cp "$CONFIG_DIR/images.env" "$CONFIG_DIR/__old-images-$ts"
+      echo "Old images.env saved to config/__old-images-$ts"
+      local old
+      old="${AYAKALEA_IMAGE//:/\\:}"
+      new_image="${new_image//:/\\:}"
+      sed -i'' "s|^AYAKALEA_IMAGE=.*|AYAKALEA_IMAGE=${new_image}|" "$CONFIG_DIR/images.env"
+      echo "AYAKALEA_IMAGE is now $new_image"
+    fi
+  fi
+
+  # ---------------- 3. Config backup ----------------
+  echo
+  echo "=== 3. Config backup ==="
+  if confirm "Back up the current config/ to config/__old-version?"; then
+    rm -rf "$CONFIG_DIR/__old-version"
+    mkdir -p "$CONFIG_DIR/__old-version"
+    local f
+    for f in "$CONFIG_DIR"/*; do
+      case "$(basename "$f")" in
+        __old-version|__old-*) continue ;;
+      esac
+      cp -r "$f" "$CONFIG_DIR/__old-version/"
+    done
+    echo "Config backed up to config/__old-version"
+  fi
+
+  # ---------------- 4. Restart ----------------
+  echo
+  echo "=== 4. Restart ==="
+  if confirm "Stop and restart the instance now (bin/stop + bin/up -d)?"; then
+    if [[ "${PULL_BEFORE_UPGRADE}" == "true" ]]; then
+      echo "Pulling configured images (set PULL_BEFORE_UPGRADE=false to skip in air-gapped setups)..."
+      local v
+      for v in AYAKALEA_IMAGE MONGO_IMAGE REDIS_IMAGE GIT_BRIDGE_IMAGE NGINX_IMAGE SEAWEEDFS_IMAGE; do
+        docker pull "${!v}" || warn "pull of ${!v} failed (continuing; the local image will be used)"
+      done
+    fi
+    ayakalea_compose stop || true
+    "$AYAKALEA_TOOLKIT_ROOT/bin/up" -d
+  fi
+
+  echo
+  echo "Upgrade walkthrough finished. Run bin/doctor to check the deployment."
+}
+
+__main__ "$@"

@@ -1,0 +1,23 @@
+---
+# Sandboxed compiles (sibling containers): every project compiles in its own
+# container spawned through the mounted Docker socket. TeX Live image names
+# come from config/images.env (TEXLIVE_IMAGE).
+services:
+  ayakalea:
+    volumes:
+      - "${DOCKER_SOCKET_PATH}:/var/run/docker.sock"
+    environment:
+      DOCKER_RUNNER: "true"
+      SANDBOXED_COMPILES: "true"
+      SANDBOXED_COMPILES_SIBLING_CONTAINERS: "true"
+      SANDBOXED_COMPILES_HOST_DIR: "${SANDBOXED_COMPILES_HOST_DIR}"
+      COMPILES_HOST_DIR: "${COMPILES_HOST_DIR}"
+      SANDBOXED_COMPILES_HOST_DIR_CACHE: "${COMPILES_CACHE_HOST_DIR}"
+      SYNCTEX_BIN_HOST_PATH: "${SYNCTEX_BIN_HOST_PATH}"
+      TEX_LIVE_DOCKER_IMAGE: "${TEX_LIVE_DOCKER_IMAGE}"
+      ALL_TEX_LIVE_DOCKER_IMAGES: "${ALL_TEX_LIVE_DOCKER_IMAGES}"
+      ALL_TEX_LIVE_DOCKER_IMAGE_NAMES: "${ALL_TEX_LIVE_DOCKER_IMAGE_NAMES}"
+
+networks:
+  ayaka-network:
+    external: true

@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# View/tail service logs.
+set -euo pipefail
+
+source "$(dirname "$0")/../lib/toolkit-core.sh"
+
+DEFAULT_TAIL_LINES=20
+MICRO_SERVICES=(chat clsi contacts docstore document-updater filestore notifications \
+    real-time spelling tags track-changes web history-v1 project-history)
+
+function compose_services() {
+  local svcs=(ayakalea)
+  [[ "$MONGO_ENABLED" == "true" ]] && svcs+=(mongo)
+  [[ "$REDIS_ENABLED" == "true" ]] && svcs+=(redis)
+  [[ "$GIT_BRIDGE_ENABLED" == "true" ]] && svcs+=(git-bridge)
+  [[ "$SEAWEEDFS_ENABLED" == "true" ]] && svcs+=(seaweedfs-master seaweedfs-volume seaweedfs-filer seaweedfs-s3)
+  [[ "$NGINX_ENABLED" == "true" ]] && svcs+=(nginx)
+  echo "${svcs[@]}"
+}
+
+function usage() {
+  echo "Usage: bin/logs [OPTIONS] [SERVICES...]"
+  echo ""
+  echo "Services (app microservices): ${MICRO_SERVICES[*]}"
+  echo "Services (containers):       ayakalea, $(compose_services | tr ' ' '\n' | grep -v '^ayakalea$' | tr '\n' ' ')"
+  echo ""
+  echo "Options:"
+  echo "  -f              follow log output"
+  echo "  -n {number}     number of lines to print (default $DEFAULT_TAIL_LINES)"
+  echo "                  use '-n all' to show all log lines"
+  echo ""
+  echo "Examples:"
+  echo "  bin/logs -n 50 web clsi"
+  echo "  bin/logs -f web"
+  echo "  bin/logs -f nginx"
+  echo "  bin/logs -f"
+}
+
+function __main__() {
+  TAIL_LINES=$DEFAULT_TAIL_LINES
+  FOLLOW=false
+  local services=()
+  if [[ $# -gt 0 && $1 =~ ^help|-h|--help$ ]]; then
+    usage && exit
+  fi
+
+  while getopts "fn:" opt; do
+    case "$opt" in
+      f) FOLLOW=true ;;
+      n) TAIL_LINES="${OPTARG}" ;;
+      \?) usage; exit 1 ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+  services=("$@")
+
+  ayakalea_prepare
+  ayakalea_require_config
+  ayakalea_compose ps >/dev/null 2>&1 || ayakalea_die "no running containers (run bin/up first)"
+
+  if [[ ${#services[@]} -eq 0 ]]; then
+    for s in $(compose_services); do services+=("$s"); done
+  fi
+
+  for service in "${services[@]}"; do
+    if [[ " ${MICRO_SERVICES[*]} " == *" $service "* ]]; then
+      # app microservice: tail its log file inside the container
+      local flags=()
+      [[ "$FOLLOW" == "true" ]] && flags+=(-f)
+      [[ "$TAIL_LINES" != "all" ]] && flags+=(-n "$TAIL_LINES")
+      echo "==> $service"
+      ayakalea_compose exec -T ayakalea tail "${flags[@]}" "/var/log/overleaf/$service.log" 2>/dev/null \
+        || ayakalea_compose logs --no-color $([[ "$TAIL_LINES" != "all" ]] && echo --tail="$TAIL_LINES") --service ayakalea 2>/dev/null | grep -E "\"name\":\"$service\"" || true
+    else
+      local flags=(--no-color)
+      [[ "$FOLLOW" == "true" ]] && flags+=(-f)
+      [[ "$TAIL_LINES" != "all" ]] && flags+=(--tail="$TAIL_LINES")
+      echo "==> $service"
+      ayakalea_compose logs "${flags[@]}" "$service" 2>/dev/null || true
+    fi
+  done
+}
+
+__main__ "$@"

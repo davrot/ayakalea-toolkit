@@ -1,0 +1,122 @@
+---
+# SeaweedFS object storage: filestore + project history (S3 API).
+# All four services stay inside ayaka-network; the S3 API is additionally
+# published on the host loopback for local admin/migration tools.
+# The buckets are overleaf-template-files, overleaf-project-blobs, overleaf-chunks.
+services:
+  seaweedfs-master:
+    image: "${SEAWEEDFS_IMAGE}"
+    container_name: seaweedfs-master
+    hostname: seaweedfs-master
+    restart: always
+    command: master -ip=master -ip.bind=0.0.0.0
+    volumes:
+      - "${SEAWEEDFS_DATA_PATH}/master:/data"
+    expose:
+      - "9333"
+      - "19333"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9333/cluster/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      ayaka-network:
+        aliases:
+          - master
+
+  seaweedfs-volume:
+    image: "${SEAWEEDFS_IMAGE}"
+    container_name: seaweedfs-volume
+    hostname: seaweedfs-volume
+    restart: always
+    command: volume -mserver="master:9333" -ip=volume -ip.bind=0.0.0.0 -port=8080 -dir=/data -max=0
+    volumes:
+      - "${SEAWEEDFS_DATA_PATH}/volume:/data"
+    expose:
+      - "8080"
+      - "18080"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      seaweedfs-master:
+        condition: service_healthy
+    networks:
+      ayaka-network:
+        aliases:
+          - volume
+
+  seaweedfs-filer:
+    image: "${SEAWEEDFS_IMAGE}"
+    container_name: seaweedfs-filer
+    hostname: seaweedfs-filer
+    restart: always
+    command: filer -master="master:9333" -ip=filer -ip.bind=0.0.0.0
+    volumes:
+      - "${SEAWEEDFS_DATA_PATH}/filer:/data"
+    expose:
+      - "8888"
+      - "18888"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8888/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      seaweedfs-master:
+        condition: service_healthy
+      seaweedfs-volume:
+        condition: service_healthy
+    networks:
+      ayaka-network:
+        aliases:
+          - filer
+
+  seaweedfs-s3:
+    image: "${SEAWEEDFS_IMAGE}"
+    container_name: seaweedfs-s3
+    hostname: seaweedfs-s3
+    restart: always
+    command: s3 -filer="filer:8888" -ip.bind=0.0.0.0
+    environment:
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
+    ports:
+      - "${SEAWEEDFS_S3_HOST}:${SEAWEEDFS_S3_PORT}:8333"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -S -o- http://localhost:8333/ 2>&1 | grep -q 'HTTP/'"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      seaweedfs-filer:
+        condition: service_healthy
+    networks:
+      ayaka-network:
+        aliases:
+          - s3
+
+  ayakalea:
+    environment:
+      OVERLEAF_FILESTORE_S3_ENDPOINT: "http://s3:8333"
+      OVERLEAF_FILESTORE_S3_PATH_STYLE: "true"
+      OVERLEAF_FILESTORE_S3_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID}"
+      OVERLEAF_FILESTORE_S3_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
+      OVERLEAF_HISTORY_S3_ENDPOINT: "http://s3:8333"
+      OVERLEAF_HISTORY_S3_PATH_STYLE: "true"
+      OVERLEAF_HISTORY_S3_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID}"
+      OVERLEAF_HISTORY_S3_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
+    depends_on:
+      seaweedfs-s3:
+        condition: service_healthy
+
+networks:
+  ayaka-network:
+    external: true

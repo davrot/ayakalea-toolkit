@@ -1,0 +1,33 @@
+---
+services:
+  mongo:
+    image: "${MONGO_IMAGE}"
+    container_name: mongo
+    hostname: mongo
+    restart: always
+    command: "--replSet ${MONGO_REPLSET}"
+    environment:
+      GLIBC_TUNABLES: glibc.cpu.hwcaps=-SHSTK
+    volumes:
+      - "${MONGO_DATA_PATH}:/data/db:z"
+    expose:
+      - "27017"
+    healthcheck:
+      # Initiates the replica set on first boot if not already initiated.
+      test: "mongosh --quiet --eval 'rs.hello().setName ? rs.hello().setName : rs.initiate({_id: \"overleaf\", members: [{_id: 0, host: \"mongo:27017\"}]})'"
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    extra_hosts:
+      - "mongo:127.0.0.1"
+    networks:
+      - ayaka-network
+
+  ayakalea:
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+networks:
+  ayaka-network:
+    external: true

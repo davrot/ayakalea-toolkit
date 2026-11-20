@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Creates the containers and recreates those whose configuration changed.
+# Run this after editing anything in config/.
+set -euo pipefail
+
+source "$(dirname "$0")/../lib/toolkit-core.sh"
+
+function usage() {
+  echo "Usage: bin/up [FLAGS...]"
+  echo ""
+  echo "A wrapper around 'docker compose up'."
+  echo "Passes any extra flags through, e.g. 'bin/up -d' runs detached."
+}
+
+function notify_about_not_using_detach_mode() {
+  local detached=false
+  for arg in "$@"; do
+    case "$arg" in
+      -d|--detach) detached=true ;;
+    esac
+  done
+  if [[ "$detached" == "false" ]]; then
+    note 'You are running "bin/up" without the detach mode ("-d" or "--detach"). '
+    note 'Behind the scenes this invokes "docker compose up", which tails the container logs '
+    note 'indefinitely until you issue a keyboard interrupt (CTRL+C).'
+  fi
+}
+
+function __main__() {
+  if [[ "${1:-null}" == "help" || "${1:-null}" == "--help" ]]; then
+    usage && exit
+  fi
+
+  ayakalea_prepare
+  ayakalea_require_config
+  has_docker || ayakalea_die "Docker is not running or not installed"
+  ensure_network
+  ensure_data_dirs
+
+  if [[ "${SIBLING_CONTAINERS_ENABLED}" == "true" ]] && [[ "${SIBLING_CONTAINERS_PULL}" == "true" ]]; then
+    "$AYAKALEA_TOOLKIT_ROOT/bin/pull-texlive"
+  fi
+
+  notify_about_not_using_detach_mode "$@"
+  ayakalea_compose up "$@"
+}
+
+__main__ "$@"
