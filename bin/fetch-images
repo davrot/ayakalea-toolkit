@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# Ensures container images are available locally.
+#
+# For every requested image (resolved from config/images.env):
+#   1. already present locally        → done
+#   2. docker pull <primary>          → done   (ghcr.io/ayaka-notes/… needs
+#                                              docker login ghcr.io for private repos)
+#   3. pull <*_FALLBACK> + retag      → done   (public upstream image)
+#   4. docker build from lib/images-build/<name> → done (bundled sources)
+#
+# Usage:
+#   bin/fetch-images                 all images of the enabled optional sets
+#                                    + the conversion bridge images
+#   bin/fetch-images <name>…         one or more of:
+#     languagetool grammar-llm instance-sensor monitoring
+#     pandoc pdftocairo png2pdf all
+set -uo pipefail
+
+source "$(dirname "$0")/../lib/toolkit-core.sh"
+
+ayakalea_prepare
+ayakalea_require_config
+command -v docker >/dev/null 2>&1 || ayakalea_die "docker not found"
+
+ROOT="$AYAKALEA_TOOLKIT_ROOT"
+BUILDS="$ROOT/lib/images-build"
+FAILED=0
+
+log()  { echo "[fetch-images] $*"; }
+
+# ensure_image <ref> [fallback-ref] [build-dir]
+ensure_image() {
+  local ref="$1" fallback="${2:-}" bdir="${3:-}"
+  if docker image inspect "$ref" >/dev/null 2>&1; then
+    log "OK   $ref (already local)"
+    return 0
+  fi
+  log "… pulling $ref"
+  if docker pull "$ref" >/dev/null 2>&1; then
+    log "OK   $ref (pulled)"
+    return 0
+  fi
+  if [[ -n "$fallback" ]]; then
+    log "… primary pull failed; trying fallback $fallback"
+    if docker pull "$fallback" >/dev/null 2>&1; then
+      docker tag "$fallback" "$ref" >/dev/null 2>&1
+      log "OK   $ref (pulled as $fallback + retagged)"
+      return 0
+    fi
+  fi
+  if [[ -n "$bdir" && -d "$bdir" ]]; then
+    log "… pulling failed; building from $bdir"
+    if docker build -t "$ref" "$bdir" >/dev/null 2>&1; then
+      log "OK   $ref (built locally)"
+      return 0
+    fi
+    log "FAIL $ref (pull and local build both failed)"
+    FAILED=1
+    return 1
+  fi
+  log "FAIL $ref (pull failed; no fallback or build source)"
+  FAILED=1
+  return 1
+}
+
+# Named images (images.env → [fallback, build dir])
+declare -A IMG=(
+  [languagetool]="${LANGUAGE_TOOL_IMAGE}|${LANGUAGE_TOOL_IMAGE_FALLBACK}|"
+  [grammar-llm]="${GRAMMAR_LLM_IMAGE}||$BUILDS/grammar-llm"
+  [instance-sensor]="${INSTANCE_SENSOR_IMAGE}||$BUILDS/instance-sensor"
+  [pandoc]="${PANDOC_IMAGE}||$BUILDS/pandoc"
+  [pdftocairo]="${PDFTOCAIRO_IMAGE}|${PDFTOCAIRO_IMAGE_FALLBACK}|$BUILDS/pdftocairo"
+  [png2pdf]="${PNG2PDF_IMAGE}|${PNG2PDF_IMAGE_FALLBACK}|$BUILDS/png2pdf"
+)
+MONITORING_IMGS=("
+PROMETHEUS_IMAGE
+GRAFANA_IMAGE
+MONGODB_EXPORTER_IMAGE
+REDIS_EXPORTER_IMAGE
+NODE_EXPORTER_IMAGE
+PROBE_IMAGE
+")
+
+fetch_named() { # name
+  local spec; spec="${IMG[$1]}"
+  local ref fb bd
+  ref="${spec%%|*}";  spec="${spec#*|}"
+  fb="${spec%%|*}";   spec="${spec#*|}"
+  bd="${spec}"
+  ensure_image "$ref" "$fb" "$bd"
+}
+
+fetch_monitoring() {
+  local v
+  for v in ${MONITORING_IMGS[@]}; do
+    ensure_image "${!v}"
+  done
+  ensure_image "${INSTANCE_SENSOR_IMAGE}" "" "$BUILDS/instance-sensor"
+}
+
+SELECTED=("$@")
+if [[ ${#SELECTED[@]} -eq 0 ]]; then
+  # enabled optional sets + bridge images
+  [[ "$LANGUAGE_TOOL_ENABLED" == "true" ]] && SELECTED+=(languagetool)
+  [[ "$GRAMMAR_LLM_ENABLED" == "true" ]] && SELECTED+=(grammar-llm)
+  [[ "$MONITORING_ENABLED" == "true" ]] && SELECTED+=(monitoring)
+  SELECTED+=(pandoc pdftocairo png2pdf)
+fi
+
+for sel in "${SELECTED[@]}"; do
+  case "$sel" in
+    languagetool|grammar-llm|instance-sensor|pandoc|pdftocairo|png2pdf)
+      fetch_named "$sel" ;;
+    monitoring) fetch_monitoring ;;
+    all)
+      for n in languagetool grammar-llm instance-sensor monitoring pandoc pdftocairo png2pdf; do
+        if [[ "$n" == "monitoring" ]]; then fetch_monitoring; else fetch_named "$n"; fi
+      done ;;
+    *) log "unknown image set '$sel' (try: languagetool grammar-llm instance-sensor monitoring pandoc pdftocairo png2pdf all)"; FAILED=1 ;;
+  esac
+done
+
+if [[ "$FAILED" -ne 0 ]]; then
+  echo "[fetch-images] some images could not be made available (see FAIL lines)." >&2
+  exit 1
+fi
+echo "[fetch-images] all requested images are available."

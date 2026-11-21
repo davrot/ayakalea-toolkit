@@ -48,6 +48,14 @@ function set_up_config_files() {
     sed -i'' "s|^AWS_SECRET_ACCESS_KEY=.*|AWS_SECRET_ACCESS_KEY=${sk}|" "$CONFIG_DIR/variables.env"
   fi
 
+  # Grafana admin password (monitoring set) — generated when enabled
+  if grep -q '^MONITORING_ENABLED=true' "$CONFIG_DIR/overleaf.rc"; then
+    local gpass
+    gpass="$(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9' | head -c 16)"
+    sed -i'' "s|^GRAFANA_ADMIN_PASSWORD=.*|GRAFANA_ADMIN_PASSWORD=${gpass}|" "$CONFIG_DIR/overleaf.rc"
+    echo "Generated GRAFANA_ADMIN_PASSWORD"
+  fi
+
   # config/ holds secrets (AWS keys, SMTP, OIDC, session tokens) — keep it private
   chmod 700 "$CONFIG_DIR"
   chmod 600 "$CONFIG_DIR/variables.env" "$CONFIG_DIR/overleaf.rc" "$CONFIG_DIR/images.env" 2>/dev/null || true

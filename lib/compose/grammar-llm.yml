@@ -1,0 +1,47 @@
+---
+# Optional set: grammar-llm — LanguageTool-compatible (v2 API on :8010)
+# grammar checker backed by a GRMR-V3-G4B LLM (node-llama-cpp). Drop-in
+# replacement for erikvl87/languagetool.
+# Image: ghcr.io/ayaka-notes/grammar-llm (built from lib/images-build/grammar-llm
+# by bin/fetch-images when the registry pull is not possible).
+# The model (~2.4 GB GGUF) lives in ${GRAMMAR_LLM_MODEL_DIR}; it is downloaded
+# from Hugging Face on first start if absent (allow up to 30 min — hence the
+# long start_period).
+services:
+  grammar-llm:
+    image: "${GRAMMAR_LLM_IMAGE}"
+    container_name: grammar-llm
+    hostname: grammar-llm
+    restart: always
+    environment:
+      GRAMMAR_LLM_PRELOAD: "true"
+      GRAMMAR_LLM_MODEL_DIR: /models
+      # Cascade: when the real LanguageTool set runs alongside (and
+      # GRAMMAR_LLM_CASCADE=true), query LT first (cheap) and the LLM second.
+      # Empty = pure LLM.
+      GRAMMAR_LLM_LANGUAGETOOL_URL: "${GRAMMAR_LLM_CASCADE_URL}"
+    volumes:
+      - "${GRAMMAR_LLM_MODEL_DIR}:/models"
+    expose:
+      - "8010"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e 'fetch(\"http://127.0.0.1:8010/v2/health\").then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))'"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 1800s
+    networks:
+      - ayaka-network
+
+  ayakalea:
+    # Drop-in: the app talks to grammar-llm with the same LanguageTool API.
+    # (This fragment is included after languagetool.yml, so when BOTH sets are
+    # enabled grammar-llm is the primary endpoint — with the LT cascade.)
+    environment:
+      LANGUAGE_TOOL_ENABLED: "true"
+      LANGUAGE_TOOL_HOST: "grammar-llm"
+      LANGUAGE_TOOL_PORT: "8010"
+
+networks:
+  ayaka-network:
+    external: true

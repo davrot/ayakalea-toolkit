@@ -84,6 +84,25 @@ function apply_defaults() {
   : "${GIT_BRIDGE_DATA_PATH:=data/git-bridge}"
   : "${GIT_BRIDGE_LOG_LEVEL:=INFO}"
 
+  # --- Language tool sets (optional) ---
+  : "${LANGUAGE_TOOL_ENABLED:=false}"
+  : "${LANGUAGE_TOOL_JAVA_XMS:=512m}"
+  : "${LANGUAGE_TOOL_JAVA_XMX:=2g}"
+  : "${LANGUAGE_TOOL_NGRAMS_DIR:=data/languagetool/ngrams}"
+  : "${GRAMMAR_LLM_ENABLED:=false}"
+  : "${GRAMMAR_LLM_MODEL_DIR:=data/grammar-llm/models}"
+  : "${GRAMMAR_LLM_CASCADE:=true}"
+
+  # --- Monitoring set: prometheus-probe-grafana (optional) ---
+  : "${MONITORING_ENABLED:=false}"
+  : "${PROMETHEUS_PORT:=9090}"
+  : "${PROMETHEUS_LISTEN_IP:=127.0.0.1}"
+  : "${PROMETHEUS_RETENTION:=15d}"
+  : "${GRAFANA_PORT:=3000}"
+  : "${GRAFANA_LISTEN_IP:=127.0.0.1}"
+  : "${GRAFANA_ADMIN_PASSWORD:=}"
+  : "${INSTANCE_SENSOR_FILESTORE_DIR:=}"
+
   # --- SeaweedFS S3 storage ---
   : "${SEAWEEDFS_ENABLED:=false}"
   : "${SEAWEEDFS_DATA_PATH:=data/seaweedfs}"
@@ -108,6 +127,25 @@ function apply_defaults() {
   : "${NGINX_IMAGE:=nginx:alpine3.24-slim}"
   : "${SEAWEEDFS_IMAGE:=chrislusf/seaweedfs:latest}"
   : "${TEXLIVE_IMAGE:=ghcr.io/ayaka-notes/texlive-full:2026.1}"
+
+  # --- Optional sets: images (config/images.env normally sets these) ---
+  : "${LANGUAGE_TOOL_IMAGE:=ghcr.io/ayaka-notes/languagetool:1.default}"
+  : "${LANGUAGE_TOOL_IMAGE_FALLBACK:=erikvl87/languagetool:latest}"
+  : "${GRAMMAR_LLM_IMAGE:=ghcr.io/ayaka-notes/grammar-llm:1.default}"
+  : "${INSTANCE_SENSOR_IMAGE:=ghcr.io/ayaka-notes/instance-sensor:1.default}"
+  : "${PROMETHEUS_IMAGE:=prom/prometheus:v2.53.5}"
+  : "${GRAFANA_IMAGE:=grafana/grafana-oss:11.6.0}"
+  : "${MONGODB_EXPORTER_IMAGE:=percona/mongodb_exporter:0.43.0}"
+  : "${REDIS_EXPORTER_IMAGE:=oliver006/redis_exporter:v1.58.0-alpine}"
+  : "${NODE_EXPORTER_IMAGE:=prom/node-exporter:v1.9.1}"
+  : "${PROBE_IMAGE:=busybox:1.36}"
+
+  # --- Conversion bridge images (app-spawned containers) ---
+  : "${PANDOC_IMAGE:=ghcr.io/ayaka-notes/pandoc:1.default}"
+  : "${PDFTOCAIRO_IMAGE:=ghcr.io/ayaka-notes/pdftocairo:24.02}"
+  : "${PDFTOCAIRO_IMAGE_FALLBACK:=sharelatex/pdftocairo:24.02}"
+  : "${PNG2PDF_IMAGE:=ghcr.io/ayaka-notes/png2pdf:2026-06-24}"
+  : "${PNG2PDF_IMAGE_FALLBACK:=sharelatex/png2pdf:2026-06-24}"
 }
 
 function source_config_files() {
@@ -161,6 +199,8 @@ function resolve_derived_vars() {
   canonicalize_path REDIS_DATA_PATH
   canonicalize_path GIT_BRIDGE_DATA_PATH
   canonicalize_path SEAWEEDFS_DATA_PATH
+  if [[ "$LANGUAGE_TOOL_ENABLED" == "true" ]]; then canonicalize_path LANGUAGE_TOOL_NGRAMS_DIR; fi
+  if [[ "$GRAMMAR_LLM_ENABLED" == "true" ]]; then canonicalize_path GRAMMAR_LLM_MODEL_DIR; fi
   [[ -n "$OVERLEAF_LOG_PATH" ]] && canonicalize_path OVERLEAF_LOG_PATH
   [[ -n "$NGINX_CONFIG_PATH" ]] && canonicalize_path NGINX_CONFIG_PATH
   [[ -n "$TLS_PRIVATE_KEY_PATH" ]] && canonicalize_path TLS_PRIVATE_KEY_PATH
@@ -201,6 +241,27 @@ function resolve_derived_vars() {
   COMPILES_CACHE_HOST_DIR="${COMPILES_CACHE_HOST_DIR:-$OVERLEAF_DATA_PATH/data/cache}"
   SYNCTEX_BIN_HOST_PATH="${SYNCTEX_BIN_HOST_PATH:-$OVERLEAF_DATA_PATH/bin/synctex}"
 
+  # --- language tool cascade (grammar-llm → real LanguageTool) ---
+  if [[ "$GRAMMAR_LLM_ENABLED" == "true" ]]; then
+    if [[ "$LANGUAGE_TOOL_ENABLED" == "true" && "$GRAMMAR_LLM_CASCADE" == "true" ]]; then
+      GRAMMAR_LLM_CASCADE_URL="http://languagetool:8010"
+    else
+      GRAMMAR_LLM_CASCADE_URL=""
+    fi
+  fi
+
+  # --- instance-sensor filestore probe dir (monitoring set) ---
+  if [[ "$MONITORING_ENABLED" == "true" ]]; then
+    if [[ -z "$INSTANCE_SENSOR_FILESTORE_DIR" ]]; then
+      if [[ "$SEAWEEDFS_ENABLED" == "true" ]]; then
+        INSTANCE_SENSOR_FILESTORE_DIR="$SEAWEEDFS_DATA_PATH"
+      else
+        INSTANCE_SENSOR_FILESTORE_DIR="/dev/null"
+      fi
+    fi
+    [[ "$INSTANCE_SENSOR_FILESTORE_DIR" != "/dev/null" ]] && canonicalize_path INSTANCE_SENSOR_FILESTORE_DIR
+  fi
+
   # --- nginx ---
   if [[ "$NGINX_ENABLED" == "true" ]]; then
     if [[ -z "${OVERLEAF_TRUSTED_PROXY_IPS:-}" ]]; then
@@ -219,6 +280,11 @@ function build_compose_flags() {
   [[ "$REDIS_ENABLED" == "true" ]] && COMPOSE_FLAGS+=(-f "$lib/redis.yml")
   [[ "$GIT_BRIDGE_ENABLED" == "true" ]] && COMPOSE_FLAGS+=(-f "$lib/git-bridge.yml")
   [[ "$SEAWEEDFS_ENABLED" == "true" ]] && COMPOSE_FLAGS+=(-f "$lib/seaweedfs.yml")
+  # Optional sets: languagetool first, then grammar-llm (when both are on,
+  # grammar-llm is the app's primary checker with the LanguageTool cascade).
+  [[ "$LANGUAGE_TOOL_ENABLED" == "true" ]] && COMPOSE_FLAGS+=(-f "$lib/languagetool.yml")
+  [[ "$GRAMMAR_LLM_ENABLED" == "true" ]] && COMPOSE_FLAGS+=(-f "$lib/grammar-llm.yml")
+  [[ "$MONITORING_ENABLED" == "true" ]] && COMPOSE_FLAGS+=(-f "$lib/prometheus-probe-grafana.yml")
   if [[ "$NGINX_ENABLED" == "true" ]]; then
     COMPOSE_FLAGS+=(-f "$lib/nginx.yml")
   else
@@ -246,9 +312,12 @@ function ensure_data_dirs() {
   if [[ "$SEAWEEDFS_ENABLED" == "true" ]]; then
     mkdir -p "$SEAWEEDFS_DATA_PATH/master" "$SEAWEEDFS_DATA_PATH/volume" "$SEAWEEDFS_DATA_PATH/filer"
   fi
+  [[ "$LANGUAGE_TOOL_ENABLED" == "true" ]] && mkdir -p "$LANGUAGE_TOOL_NGRAMS_DIR"
+  [[ "$GRAMMAR_LLM_ENABLED" == "true" ]] && mkdir -p "$GRAMMAR_LLM_MODEL_DIR"
 }
 
 function export_compose_vars() {
+  export AYAKALEA_TOOLKIT_ROOT
   export PROJECT_NAME CONFIG_DIR
   export OVERLEAF_DATA_PATH OVERLEAF_LISTEN_IP OVERLEAF_PORT
   export MONGO_URL OVERLEAF_MONGO_URL MONGO_REPLSET MONGO_DATA_PATH MONGO_IMAGE
@@ -265,6 +334,14 @@ function export_compose_vars() {
   export TEX_LIVE_DOCKER_IMAGE ALL_TEX_LIVE_DOCKER_IMAGES ALL_TEX_LIVE_DOCKER_IMAGE_NAMES
   export OVERLEAF_TRUSTED_PROXY_IPS OVERLEAF_SECURE_COOKIE
   export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+  # optional sets
+  export LANGUAGE_TOOL_ENABLED LANGUAGE_TOOL_IMAGE LANGUAGE_TOOL_JAVA_XMS LANGUAGE_TOOL_JAVA_XMX LANGUAGE_TOOL_NGRAMS_DIR
+  export GRAMMAR_LLM_ENABLED GRAMMAR_LLM_IMAGE GRAMMAR_LLM_MODEL_DIR GRAMMAR_LLM_CASCADE GRAMMAR_LLM_CASCADE_URL
+  export MONITORING_ENABLED PROMETHEUS_PORT PROMETHEUS_LISTEN_IP PROMETHEUS_RETENTION
+  export GRAFANA_PORT GRAFANA_LISTEN_IP GRAFANA_ADMIN_PASSWORD
+  export INSTANCE_SENSOR_IMAGE INSTANCE_SENSOR_FILESTORE_DIR
+  export PROMETHEUS_IMAGE GRAFANA_IMAGE MONGODB_EXPORTER_IMAGE REDIS_EXPORTER_IMAGE NODE_EXPORTER_IMAGE PROBE_IMAGE
+  export PANDOC_IMAGE PDFTOCAIRO_IMAGE PNG2PDF_IMAGE
   if [[ -n "$OVERLEAF_LOG_PATH" ]]; then export OVERLEAF_LOG_PATH; fi
   return 0
 }

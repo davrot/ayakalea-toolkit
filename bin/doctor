@@ -56,6 +56,48 @@ function __main__() {
     [[ -n "${AWS_ACCESS_KEY_ID:-}" && -n "${AWS_SECRET_ACCESS_KEY:-}" ]] \
       && ok "SeaweedFS S3 credentials are set" || error "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are empty (needed by SeaweedFS S3)"
   fi
+  if [[ "$LANGUAGE_TOOL_ENABLED" == "true" ]]; then
+    command -v docker >/dev/null 2>&1 && docker image inspect "$LANGUAGE_TOOL_IMAGE" >/dev/null 2>&1 \
+      && ok "languagetool image: $LANGUAGE_TOOL_IMAGE (local)" \
+      || warn "languagetool image missing: $LANGUAGE_TOOL_IMAGE (run bin/fetch-images languagetool)"
+    [[ -d "$LANGUAGE_TOOL_NGRAMS_DIR" ]] \
+      && ok "n-grams dir: $LANGUAGE_TOOL_NGRAMS_DIR" \
+      || warn "n-grams dir missing: $LANGUAGE_TOOL_NGRAMS_DIR (optional; lib/tools/download-ngrams.sh)"
+  fi
+  if [[ "$GRAMMAR_LLM_ENABLED" == "true" ]]; then
+    command -v docker >/dev/null 2>&1 && docker image inspect "$GRAMMAR_LLM_IMAGE" >/dev/null 2>&1 \
+      && ok "grammar-llm image: $GRAMMAR_LLM_IMAGE (local)" \
+      || warn "grammar-llm image missing: $GRAMMAR_LLM_IMAGE (run bin/fetch-images grammar-llm)"
+    if ls "$GRAMMAR_LLM_MODEL_DIR"/*.gguf >/dev/null 2>&1; then
+      ok "grammar-llm model present: $GRAMMAR_LLM_MODEL_DIR"
+    else
+      warn "grammar-llm model not present yet (auto-downloads on first start, ~2.4 GB; pre-place in $GRAMMAR_LLM_MODEL_DIR)"
+    fi
+  fi
+  if [[ "$MONITORING_ENABLED" == "true" ]]; then
+    [[ -n "$GRAFANA_ADMIN_PASSWORD" ]] \
+      && ok "GRAFANA_ADMIN_PASSWORD is set" \
+      || error "GRAFANA_ADMIN_PASSWORD is empty (set in config/overleaf.rc or re-run bin/init)"
+    for v in PROMETHEUS_IMAGE GRAFANA_IMAGE MONGODB_EXPORTER_IMAGE REDIS_EXPORTER_IMAGE NODE_EXPORTER_IMAGE PROBE_IMAGE INSTANCE_SENSOR_IMAGE; do
+      ref="${!v}"
+      command -v docker >/dev/null 2>&1 && docker image inspect "$ref" >/dev/null 2>&1 \
+        && ok "monitoring $v = $ref (local)" \
+        || warn "monitoring $v missing: $ref (run bin/fetch-images monitoring)"
+    done
+    [[ -f "$AYAKALEA_TOOLKIT_ROOT/lib/monitoring/prometheus/prometheus.yml" ]] \
+      && ok "monitoring assets bundled (lib/monitoring/)" \
+      || error "monitoring assets missing (lib/monitoring/)"
+  fi
+  if grep -qE '^ENABLE_PANDOC_CONVERSIONS=true' "$CONFIG_DIR/variables.env" 2>/dev/null \
+     || grep -qE '^ENABLE_PNG2PDF_CONVERSIONS=true' "$CONFIG_DIR/variables.env" 2>/dev/null \
+     || grep -qE '^ENABLE_CONVERSIONS=true' "$CONFIG_DIR/variables.env" 2>/dev/null; then
+    for v in PANDOC_IMAGE PDFTOCAIRO_IMAGE PNG2PDF_IMAGE; do
+      ref="${!v}"
+      command -v docker >/dev/null 2>&1 && docker image inspect "$ref" >/dev/null 2>&1 \
+        && ok "conversion image $v = $ref (local)" \
+        || warn "conversion image missing: $ref (run bin/fetch-images; conversions will fail until pulled/built)"
+    done
+  fi
   if [[ "$NGINX_ENABLED" == "true" ]]; then
     [[ -f "$TLS_PRIVATE_KEY_PATH" ]] && ok "TLS private key: $TLS_PRIVATE_KEY_PATH" || error "TLS private key missing: $TLS_PRIVATE_KEY_PATH"
     [[ -f "$TLS_CERTIFICATE_PATH" ]] && ok "TLS certificate: $TLS_CERTIFICATE_PATH" || error "TLS certificate missing: $TLS_CERTIFICATE_PATH"
@@ -87,9 +129,13 @@ function __main__() {
       warn "network 'ayaka-network' missing (created automatically by bin/up)"
     fi
 
-    if ayakalea_compose ps 2>/dev/null | grep -q "ayakalea"; then
+    # Buffer first: 'grep -q' exits on the first match and can SIGPIPE
+    # 'docker compose ps' mid-write, which pipefail would report as failure.
+    local pslist
+    pslist="$(ayakalea_compose ps --format '{{.Service}}' 2>/dev/null || true)"
+    if [[ "${pslist}" == *ayakalea* ]]; then
       local running
-      running="$(ayakalea_compose ps --format '{{.Service}}' 2>/dev/null | sort -u | tr '\n' ' ')"
+      running="$(printf '%s\n' "${pslist}" | sort -u | tr '\n' ' ')"
       ok "running services: ${running:-none}"
       if [[ -z "${running:-}" ]]; then
         warn "no services running yet (bin/up -d)"
@@ -111,7 +157,7 @@ function __main__() {
       local probe service
       probe() { # name command
         local name="$1"; shift
-        if ayakalea_compose ps --format '{{.Service}}' 2>/dev/null | grep -qx "$name"; then
+        if printf '%s\n' "${pslist}" | grep -qx "$name"; then
           if "$@" >/dev/null 2>&1; then ok "probe $name"; else warn "probe $name failed"; fi
         fi
       }
@@ -121,7 +167,7 @@ function __main__() {
       probe seaweedfs-s3 ayakalea_compose exec -T seaweedfs-s3 sh -c 'wget -S -o- http://localhost:8333/ 2>&1 | grep -q "HTTP/"'
       probe ayakalea ayakalea_compose exec -T ayakalea sh -c 'curl -fsI --connect-timeout 10 http://localhost'
 
-      if [[ "$MONGO_ENABLED" == "true" ]] && ayakalea_compose ps --format '{{.Service}}' 2>/dev/null | grep -qx mongo; then
+      if [[ "$MONGO_ENABLED" == "true" ]] && printf '%s\n' "${pslist}" | grep -qx mongo; then
         local dbs
         dbs="$(ayakalea_compose exec -T mongo mongosh --quiet --eval 'db.adminCommand({listDatabases:1}).databases.map(d=>d.name).join(",")' 2>/dev/null || true)"
         if [[ -n "$dbs" ]]; then

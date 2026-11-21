@@ -29,6 +29,27 @@ function __main__() {
     printf '%-22s %-55s %s\n' "$v" "$ref" "$status"
   done
 
+  # Optional sets (shown with their enabled/disabled state)
+  echo
+  local optvars=()
+  [[ "$LANGUAGE_TOOL_ENABLED" == "true" ]] && optvars+=(LANGUAGE_TOOL_IMAGE)
+  [[ "$GRAMMAR_LLM_ENABLED" == "true" ]] && optvars+=(GRAMMAR_LLM_IMAGE)
+  if [[ "$MONITORING_ENABLED" == "true" ]]; then
+    optvars+=(INSTANCE_SENSOR_IMAGE PROMETHEUS_IMAGE GRAFANA_IMAGE MONGODB_EXPORTER_IMAGE REDIS_EXPORTER_IMAGE NODE_EXPORTER_IMAGE PROBE_IMAGE)
+  fi
+  local convvars=(PANDOC_IMAGE PDFTOCAIRO_IMAGE PNG2PDF_IMAGE)
+  if [[ ${#optvars[@]} -gt 0 || ${#convvars[@]} -gt 0 ]]; then
+    echo "Optional-set + conversion bridge images:"
+    for v in "${optvars[@]:-}" "${convvars[@]}"; do
+      [[ -z "$v" ]] && continue
+      ref="${!v}"
+      status="MISSING"
+      docker image inspect "$ref" >/dev/null 2>&1 && status="present"
+      printf '  %-22s %-55s %s\n' "$v" "$ref" "$status"
+    done
+    echo "  (make available: bin/fetch-images)"
+  fi
+
   echo
   echo "TeX Live images (sandboxed compiles):"
   local img

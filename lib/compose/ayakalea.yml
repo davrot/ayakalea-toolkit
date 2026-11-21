@@ -20,6 +20,12 @@ services:
       GIT_BRIDGE_ENABLED: "${GIT_BRIDGE_ENABLED}"
       GIT_BRIDGE_HOST: "git-bridge"
       GIT_BRIDGE_PORT: "8000"
+      # Conversion bridge images — the app starts these containers itself via
+      # the Docker socket when ENABLE_PANDOC_CONVERSIONS / ENABLE_PNG2PDF_CONVERSIONS
+      # are on (config/variables.env). Image names: config/images.env.
+      PANDOC_IMAGE: "${PANDOC_IMAGE}"
+      PNG2PDF_IMAGE: "${PNG2PDF_IMAGE}"
+      CONVERSION_SANDBOX_IMAGE: "${PDFTOCAIRO_IMAGE}"
     volumes:
       - "${OVERLEAF_DATA_PATH}:/var/lib/overleaf:z"
     expose:
